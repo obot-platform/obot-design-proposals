@@ -3,6 +3,7 @@
 set -euo pipefail
 
 required_files=(
+  ".github/PULL_REQUEST_TEMPLATE.md"
   ".github/workflows/build.yml"
   "AGENTS.md"
   "LICENSE"

@@ -11,8 +11,8 @@
 
 <!--
 Link every GitHub issue driving this work. Add a short description when an
-issue's relationship to the proposal is not obvious. A proposal is expected to
-have at least one related issue.
+issue's relationship to the proposal is not obvious. Every proposal must have
+at least one related issue.
 -->
 
 ## Related ODPs
@@ -61,7 +61,11 @@ Use examples and diagrams when they make the design easier to evaluate.
 
 ## Trade-offs
 
-<!-- What becomes easier or harder? What cost or flexibility are we giving up? -->
+<!--
+Describe the trade-offs of the proposed design relative to the important
+alternatives. What becomes easier or harder? What cost or flexibility are we
+giving up?
+-->
 
 ## Risks and open questions
 

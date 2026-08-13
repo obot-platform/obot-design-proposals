@@ -33,8 +33,9 @@ Idea -> proposal PR -> discussion and revision -> approval and merge
 
 A merged proposal means the design is accepted and implementation may proceed.
 It is a plan, not a promise that every detail will ship unchanged. If
-implementation reveals a material architectural change, update the proposal or
-open a follow-up proposal before proceeding.
+implementation reveals a material architectural change, open a follow-up
+proposal before proceeding and link the two proposals through their **Related
+ODPs** sections. Do not materially rewrite the merged proposal.
 
 The ADR belongs in the repository that contains the implementation. It records
 the concise, durable decision that actually shipped and links back to the
@@ -47,8 +48,9 @@ proposal. This repository preserves the earlier design and its discussion.
 2. Choose the next available four-digit number. Proposal numbers identify
    documents; they do not imply priority or order of implementation.
 3. Add every GitHub issue driving the work to the proposal's **Related issues**
-   section. Use direct links and briefly describe each issue's relationship to
-   the proposal when it is not obvious.
+   section. Every proposal must have at least one related issue. Use direct
+   links and briefly describe each issue's relationship to the proposal when it
+   is not obvious.
 4. Fill in the sections that help reviewers understand the design. Write
    `Not applicable` where that is genuinely the answer; remove optional
    prompts that add no value.

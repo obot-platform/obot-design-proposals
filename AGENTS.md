@@ -12,9 +12,9 @@ for architectural clarity, early collaboration, and a lightweight process.
 - Start from `templates/design-proposal.md` and add the proposal to the index in
   `proposals/README.md` in the same change.
 - Populate the **Related issues** section with direct links to every GitHub
-  issue driving the work. Do not remove this section or substitute a PR
-  description for it. If the relationship is unclear, annotate the link with a
-  short explanation.
+  issue driving the work. Every proposal must have at least one related issue.
+  Do not remove this section or substitute a PR description for it. If the
+  relationship is unclear, annotate the link with a short explanation.
 - Do not manufacture requirements or decisions. Mark missing information as an
   open question or `TBD`, and distinguish facts from assumptions.
 - Keep documents concise, but include enough detail to evaluate interfaces,
