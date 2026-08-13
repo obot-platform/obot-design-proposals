@@ -103,10 +103,7 @@ not mean every minor implementation detail has been predetermined.
 ├── templates/
 │   └── design-proposal.md
 └── proposals/
-    ├── README.md
     └── NNNN-short-name/
         ├── README.md
         └── optional-supporting-files
 ```
-
-The proposal list is maintained in [`proposals/README.md`](proposals/README.md).

@@ -8,7 +8,6 @@ required_files=(
   "AGENTS.md"
   "LICENSE"
   "README.md"
-  "proposals/README.md"
   "scripts/validate.sh"
   "templates/design-proposal.md"
 )

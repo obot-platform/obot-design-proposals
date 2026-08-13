@@ -5,12 +5,11 @@ for architectural clarity, early collaboration, and a lightweight process.
 
 ## Working on proposals
 
-- Read the root `README.md`, `proposals/README.md`, and the proposal template
-  before creating or substantially editing a proposal.
+- Read the root `README.md` and the proposal template before creating or
+  substantially editing a proposal.
 - New proposals live at `proposals/NNNN-short-name/README.md`. Use the next
   available four-digit number and a concise kebab-case name.
-- Start from `templates/design-proposal.md` and add the proposal to the index in
-  `proposals/README.md` in the same change.
+- Start from `templates/design-proposal.md`.
 - Populate the **Related issues** section with direct links to every GitHub
   issue driving the work. Every proposal must have at least one related issue.
   Do not remove this section or substitute a PR description for it. If the
@@ -31,8 +30,7 @@ for architectural clarity, early collaboration, and a lightweight process.
   `extends`, or `depends on`; do not add a supersession relationship unless a
   human has made that decision.
 - Preserve authorship.
-- Check internal links, headings, proposal metadata, and the proposal index
-  before finishing.
+- Check internal links, headings, and proposal metadata before finishing.
 
 ## Reviewing proposals
 

@@ -10,7 +10,6 @@
 
 - [ ] The proposal follows `templates/design-proposal.md`, or explains why a
       section is not relevant.
-- [ ] The proposal index is updated.
 - [ ] The proposal's **Related issues** section links every GitHub issue driving
       the work.
 - [ ] Important alternatives and trade-offs are documented.
