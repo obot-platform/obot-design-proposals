@@ -1,4 +1,4 @@
-# 0001: Local agent Filters
+# 2026-08-14: Local agent Filters
 
 - **Authors:** @g-linville
 - **Created:** 2026-08-14
