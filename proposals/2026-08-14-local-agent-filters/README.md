@@ -50,7 +50,7 @@ adapts native hook protocols, and existing Filters remain compatible.
 ## Goals
 
 - Allow a Filter to target all enrolled devices and select any combination of
-  `userPrompt`, `toolCall`, and `toolResponse` events.
+  `userPrompt`, `toolCallArguments`, and `toolResponse` events.
 - Evaluate every matching Filter in a stable order, with accepted mutations
   feeding into subsequent Filters.
 - Preserve the existing Filter invocation and result semantics so current MCP
@@ -61,7 +61,8 @@ adapts native hook protocols, and existing Filters remain compatible.
 - Fail closed when a Filter decision is unknown or rejects an event, to the
   extent the native agent hook supports control of that event.
 - Preserve current audit-only behavior when local-agent filtering is disabled.
-- Remove the experimental allowlist enforcement feature and its stored data.
+- Remove the experimental allowlist enforcement feature while orphaning its
+  decision-log table.
 - Persist one protected record for every Filter invocation handled by the
   shared decision pipeline.
 - Add a Decision Log to each Filter, with encrypted PII and raw data visible
@@ -85,8 +86,8 @@ adapts native hook protocols, and existing Filters remain compatible.
 - Exporting Filter decisions in the first release.
 - Recording decisions from the existing Nanobot/MCP path before it adopts the
   shared decision framework.
-- Preserving the experimental enforcement decision log or its configuration
-  during migration.
+- Preserving application access to the experimental enforcement decision log
+  or its configuration.
 
 ## Context and constraints
 
@@ -160,12 +161,14 @@ servers target:
   "resources": [
     {"type": "deviceSelector", "id": "*"}
   ],
-  "localAgentEvents": ["userPrompt", "toolCall", "toolResponse"]
+  "localAgentEvents": ["*"]
 }
 ```
 
 The device target requires at least one local-agent event, and local-agent
-events are invalid without a device target. `toolResponse` includes both
+events are invalid without a device target. `*` selects `userPrompt`,
+`toolCallArguments`, and `toolResponse` and cannot be combined with explicit
+event values. Explicit values select a subset. `toolResponse` includes both
 successful and failed tool execution when the provider exposes those events.
 Individual device selection is not part of this design.
 
@@ -182,7 +185,7 @@ post-tool events. Its transport object is private to the Obot/Sentry boundary;
 it is not forwarded as the Filter input. It conveys:
 
 - local-agent provider and exact native hook event;
-- normalized surface: `userPrompt`, `toolCall`, or `toolResponse`;
+- normalized surface: `userPrompt`, `toolCallArguments`, or `toolResponse`;
 - request, response, or failure phase;
 - unmodified provider-native JSON payload;
 - raw tool name and correlation fields when the provider supplies them;
@@ -419,10 +422,9 @@ resolution, but administrators may see the same activity evaluated twice.
 Documentation and UI language must explain that targets represent enforcement
 surfaces rather than mutually exclusive identities.
 
-Deleting the experimental enforcement data simplifies the resulting product
-and avoids a misleading legacy record, but prevents rollback to the old feature
-after the destructive migration. Rollout sequencing must ensure compatible
-Sentry packages are available first.
+Orphaning the experimental decision table avoids destructive data loss but
+leaves unused data in the database. The old feature remains unavailable because
+its code and product surfaces are removed.
 
 Persisting every invoked Filter provides an explainable enforcement history,
 but increases database volume and places sensitive prompts and tool data at
@@ -456,10 +458,9 @@ Rollout is staged across Obot and Obot Sentry:
 5. The tombstone is removed in the following release after the supported Sentry
    upgrade window.
 
-The migration deletes the experimental enforcement decision-log table and the
-old enforcement configuration columns. No export or data rollback is provided.
-All old enforcement evaluator, API, UI, configuration-resolution, allowlist,
-and decision-log behavior is removed.
+The migration drops the old enforcement configuration columns but leaves the
+experimental decision-log table and its rows untouched. The table is orphaned:
+all evaluator, API, UI, persistence, export, and cleanup paths are removed.
 
 `FiltersEnabled` defaults to false and does not inherit or alias any old
 enforcement setting. An upgraded installation therefore converges to current
