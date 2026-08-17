@@ -500,6 +500,13 @@ independent evaluation for a Filter with both device and MCP targets, and scans
 logs and database records to confirm payloads and mutations exist only as
 ciphertext in the decision table and are returned only to Auditors.
 
+## Follow-up work
+
+We want to extend local agent audit logs to also log on the pre-tool hook and not on the post-tool hook only.
+This will allow us to capture the initial request data and then enrich the same log row with the response data.
+Some of the supported agents do not call the post-tool hooks when the tool call fails,
+and currently that results in no audit log at all.
+
 ## References
 
 - [Claude Code hooks](https://code.claude.com/docs/en/hooks)
