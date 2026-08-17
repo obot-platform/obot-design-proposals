@@ -1,4 +1,4 @@
-# NNNN: Proposal title
+# YYYY-MM-DD: Proposal title
 
 - **Authors:** @author
 - **Created:** YYYY-MM-DD
