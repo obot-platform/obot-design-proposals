@@ -44,9 +44,8 @@ proposal. This repository preserves the earlier design and its discussion.
 ## Creating a proposal
 
 1. Copy [`templates/design-proposal.md`](templates/design-proposal.md) to
-   `proposals/NNNN-short-name/README.md`.
-2. Choose the next available four-digit number. Proposal numbers identify
-   documents; they do not imply priority or order of implementation.
+   `proposals/YYYY-MM-DD-short-name/README.md`.
+2. Use the proposal's creation date followed by a concise kebab-case name.
 3. Add every GitHub issue driving the work to the proposal's **Related issues**
    section. Every proposal must have at least one related issue. Use direct
    links and briefly describe each issue's relationship to the proposal when it
@@ -62,8 +61,8 @@ proposal. This repository preserves the earlier design and its discussion.
    remain understandable without reading the entire PR conversation.
 8. Merge the proposal once it is approved.
 
-If two open proposals choose the same number, the later one should take the
-next available number before merge.
+If two proposals would use the same date and short name, the later one should
+choose a more specific short name before merge.
 
 Merged proposals are not edited merely to mirror implementation details. Small
 corrections and links are welcome. Material design changes should be reviewed
@@ -103,7 +102,7 @@ not mean every minor implementation detail has been predetermined.
 ├── templates/
 │   └── design-proposal.md
 └── proposals/
-    └── NNNN-short-name/
+    └── YYYY-MM-DD-short-name/
         ├── README.md
         └── optional-supporting-files
 ```

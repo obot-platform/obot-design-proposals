@@ -7,8 +7,8 @@ for architectural clarity, early collaboration, and a lightweight process.
 
 - Read the root `README.md` and the proposal template before creating or
   substantially editing a proposal.
-- New proposals live at `proposals/NNNN-short-name/README.md`. Use the next
-  available four-digit number and a concise kebab-case name.
+- New proposals live at `proposals/YYYY-MM-DD-short-name/README.md`. Use the
+  proposal's creation date and a concise kebab-case name.
 - Start from `templates/design-proposal.md`.
 - Populate the **Related issues** section with direct links to every GitHub
   issue driving the work. Every proposal must have at least one related issue.
