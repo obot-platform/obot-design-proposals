@@ -11,6 +11,11 @@ all matching device Filters are evaluated in a deterministic pipeline. For
 post-tool events, the same request will also submit the existing Local Agent
 Tool Call Audit Log input.
 
+Every Filter invocation handled by the shared pipeline is persisted as a
+protected decision record. Filter pages expose a Decision Log containing
+non-sensitive metadata, while PII and raw decision content are encrypted and
+available only to users with the Auditor role.
+
 This design replaces the experimental MCP-server allowlist enforcement feature.
 It deliberately does not make Obot Sentry resolve a local tool name to an MCP
 server. Device filtering and MCP-server filtering are independent enforcement
@@ -57,6 +62,10 @@ adapts native hook protocols, and existing Filters remain compatible.
   extent the native agent hook supports control of that event.
 - Preserve current audit-only behavior when local-agent filtering is disabled.
 - Remove the experimental allowlist enforcement feature and its stored data.
+- Persist one protected record for every Filter invocation handled by the
+  shared decision pipeline.
+- Add a Decision Log to each Filter, with encrypted PII and raw data visible
+  only to Auditors.
 - Make the Filter decision pipeline reusable by Obot's future MCP execution
   path without coupling that pipeline to local-agent transport types.
 
@@ -71,8 +80,11 @@ adapts native hook protocols, and existing Filters remain compatible.
 - Adding mutation support to HTTP-backed Filters.
 - Guaranteeing enforcement for native-agent events that have no hook, or whose
   hook cannot reject or safely suppress the original content.
-- Persisting user prompts, pre-tool payloads, mutations, Filter reasons, or
-  per-Filter decision records.
+- Persisting raw Filter data outside the encrypted sensitive fields of the new
+  Filter decision table.
+- Exporting Filter decisions in the first release.
+- Recording decisions from the existing Nanobot/MCP path before it adopts the
+  shared decision framework.
 - Preserving the experimental enforcement decision log or its configuration
   during migration.
 
@@ -96,9 +108,10 @@ by the initial provider set. These capabilities change over time and cannot be
 trusted solely from a client request.
 
 Raw local-agent payloads may contain secrets and sensitive user or tool data.
-Prompt and pre-tool payloads must remain transient. The existing audit log is
-the only persistence path in this design and retains its current schema and
-meaning.
+The new Filter decision table is the only new persistence path for prompt and
+pre-tool payloads. Those payloads, mutations, Filter outputs, reasons, PII, and
+detailed source context are encrypted and readable only by Auditors. The
+existing audit log retains its current schema and meaning.
 
 ## Proposed design
 
@@ -114,6 +127,8 @@ flowchart LR
     P --> F1[Filter 1]
     F1 --> FN[Filter N]
     FN --> D[Accept, reject, or mutate]
+    P --> V[(Encrypted Filter decisions)]
+    V --> U[Per-Filter Decision Log]
     E -->|post-tool audit input| L[Audit persistence]
     D --> R[Provider response adapter]
     L --> R
@@ -270,6 +285,19 @@ The same decision pipeline can later serve Obot's MCP path by supplying MCP
 selection context and MCP-specific identity validation. It does not require the
 local-agent transport object or a provider response adapter.
 
+### Decision Log API and UI
+
+Add Filter-scoped, read-only endpoints for a paginated metadata list and a
+single decision detail:
+
+- `GET /api/mcp-webhook-validations/{filter_id}/decisions`
+- `GET /api/mcp-webhook-validations/{filter_id}/decisions/{decision_id}`
+
+List queries select only non-sensitive columns. Detail queries select and
+decrypt sensitive fields only for callers for whom `UserIsAuditor()` is true.
+
+The Filter detail page adds a `Decision Log` tab distinct from `Audit Logs`.
+
 ### Provider capabilities and coverage
 
 Obot and Obot Sentry maintain matching, table-driven capability definitions for
@@ -313,6 +341,10 @@ Therefore, an audit storage failure does not block content that Filters are
 known to have accepted. Conversely, successful audit persistence does not
 override a Filter rejection.
 
+Failure to encrypt or persist a Filter decision is an infrastructure rejection
+and stops later Filter execution. It remains independent of the optional
+tool-call audit outcome.
+
 The audit input always describes the original, pre-filter tool result or
 failure. Mutations affect what the model receives, not the audit record. Sentry
 reuses the audit record's existing idempotency key. Spool replay uses only the
@@ -321,11 +353,15 @@ could differ from the decision made inline.
 
 ### Data protection and observability
 
-Raw prompts and pre-tool payloads exist only for inline evaluation. They are not
-stored in database rows, audit records, decision logs, application logs, access
-logs, debug output, or errors. The existing post-tool audit schema and UI remain
-unchanged and store the original result under current semantics. Mutated
-payloads, Filter reasons, and per-Filter statuses are not added to that record.
+Raw prompts, pre-tool payloads, tool responses, mutations, and Filter outputs
+may be stored only in encrypted sensitive fields of the Filter decision table.
+They are not stored in other database rows, application logs, access logs,
+debug output, errors, metrics, or traces. The existing post-tool audit schema
+and UI remain unchanged and store the original result under current semantics.
+Mutated payloads, Filter reasons, and per-Filter statuses are not added to that
+record.
+
+Decision rows use the MCP audit-log retention setting.
 
 Operational telemetry contains metadata only: Filter resource identifier,
 surface, duration, decision class, bounded error class, timeout, capability
@@ -388,7 +424,14 @@ and avoids a misleading legacy record, but prevents rollback to the old feature
 after the destructive migration. Rollout sequencing must ensure compatible
 Sentry packages are available first.
 
-## Risks and open questions
+Persisting every invoked Filter provides an explainable enforcement history,
+but increases database volume and places sensitive prompts and tool data at
+rest. Encryption, column omission, retention cleanup, authorization tests, and
+data minimization are therefore part of correctness rather than optional
+hardening. If storage failure fails closed, database health also becomes part
+of inline Filter availability.
+
+## Risks
 
 - Some post-tool failures cannot be intercepted. These are coverage gaps, not
   fail-open decisions, and must be visible to administrators.
@@ -398,8 +441,8 @@ Sentry packages are available first.
 Rollout is staged across Obot and Obot Sentry:
 
 1. Obot gains the device target model, reusable decision pipeline, disabled-by-
-   default configuration, and device event API while old enforcement remains
-   operational.
+   default configuration, protected decision storage and UI, and device event
+   API while old enforcement remains operational.
 2. A new Obot Sentry release gains provider adapters, the unified event client,
    audit spooling behavior, `FiltersEnabled`, and hook convergence. It removes
    its allowlist resolver and old enforcement command.
@@ -431,17 +474,21 @@ mismatches, and spool actions are monitored through the rollout.
 
 ## Testing and validation
 
-The design is validated at four boundaries:
+The design is validated at five boundaries:
 
 - **Filter pipeline:** selection, stable ordering, mutation chaining, first
   rejection, malformed results, timeouts, duplicate selectors, no-match accept,
-  and legacy structured/text output compatibility.
+  legacy structured/text output compatibility, and one effective decision
+  record per invoked Filter.
 - **Provider adapters:** raw fixture preservation and native accept, reject, and
   mutation responses for every supported provider/event/version combination;
   unsupported behavior must resolve to rejection or an explicit coverage gap.
 - **Unified event flow:** authenticated identity, server capability enforcement,
-  payload limits, no persistence of prompts/pre-tool bodies, and every
-  Filter/audit partial-outcome combination.
+  payload limits, encrypted-only persistence of prompts/pre-tool bodies, and
+  every Filter/audit partial-outcome combination.
+- **Decision access:** ciphertext-at-rest checks, non-sensitive list queries,
+  Auditor-only decryption, non-Auditor redaction, Filter-scoped object lookup,
+  retention, and deletion behavior.
 - **Upgrade and operations:** Filters-off audit parity, old-hook convergence,
   third-party hook preservation, destructive database migration, allow-only
   tombstone behavior, audit idempotency, and audit-only spool replay.
@@ -449,8 +496,8 @@ The design is validated at four boundaries:
 End-to-end acceptance includes zero, accepting, rejecting, mutating, chained,
 timed-out, malformed, and HTTP-backed Filters. It also verifies intentional
 independent evaluation for a Filter with both device and MCP targets, and scans
-logs and database records to confirm transient payloads and mutations are not
-retained.
+logs and database records to confirm payloads and mutations exist only as
+ciphertext in the decision table and are returned only to Auditors.
 
 ## References
 
