@@ -6,23 +6,22 @@
 ## Summary
 
 Remove the embedded component manifests from composite catalog entries and
-composite servers. A composite then persists references to its component sources
-plus the state it owns: tool overrides, tool prefixes, and per-deployment
-choices.
+composite servers. A composite then persists references to its components plus
+the state it owns: tool overrides, tool prefixes, and per-deployment choices.
+Composite responses carry live component data as response-only details, and
+component servers are created and updated from their own catalog entries.
 
-Composite responses carry live component data as response-only details. Each
-component server reports drift against its own catalog entry and adopts changes
-through the standard server update flow, and updating a composite server applies
-every pending component update before adopting the composite's own curation
-changes. This removes the separate component refresh step without automatically
-changing running deployments.
+This lets a component server be updated on its own, lets one update on a
+composite server update every component server, and removes the separate
+component refresh step. Nothing about a running deployment changes without an
+explicit update.
 
 ## Related issues
 
 - [obot-platform/obot#7028](https://github.com/obot-platform/obot/issues/7028) —
   requests composites that are thinner pointers to their components.
 - [obot-platform/obot#7130](https://github.com/obot-platform/obot/issues/7130) —
-  reports composite entries that accept invalid component references.
+  reports composite catalog entries that accept invalid component references.
 
 ## Related ODPs
 
@@ -30,9 +29,9 @@ None.
 
 ## Problem and motivation
 
-A composite catalog entry embeds a snapshot of each upstream component's manifest,
-and a composite server created from that entry embeds a second copy of the
-corresponding runtime manifests. The composite reads, validates, and creates
+A composite catalog entry embeds a snapshot of each upstream component's
+manifest, and a composite server created from that entry embeds a second copy of
+the corresponding runtime manifests. The composite reads, validates, and creates
 component servers from these embedded manifests rather than from the objects
 they reference.
 
@@ -48,8 +47,8 @@ Neither step can be narrowed. A component server cannot be updated on its own,
 and updating a composite server adopts changes for all of its components at
 once.
 
-Snapshotting also interacts poorly with state that lives outside the manifest.
-A static OAuth credential is stored alongside an upstream component's catalog
+Snapshotting also interacts poorly with state that lives outside the manifest. A
+static OAuth credential is stored alongside an upstream component's catalog
 entry and read live by every server created from it, while the configuration it
 authenticates stays frozen in each composite's snapshot. An administrator who
 rotates that credential alongside a configuration change unknowingly breaks
@@ -60,33 +59,24 @@ against the old configuration, and no drift signal reports it.
 
 - Remove component manifest snapshots from composites
 - Eliminate the explicit "component refresh" step for composite catalog entries
-- Let administrators update a single component through the standard server
-  update flow
-- Make one update action on a composite server adopt everything it is behind on
+- Enable updating component servers individually
+- Enable updating all component servers along with the composite
 - Make composite catalog entries and servers always present the current state of
   their component sources
 - Keep existing composites working through the rollout
 
 ## Non-goals
 
-- Automatically update deployed components
-- Change tool override semantics
-- Preserve a point-in-time record of source component configuration
-- Support nested or multi-user composites
-- Support composites in Power User Workspaces
+- Automatically updating deployed component servers
+- Changing tool override semantics
+- Preserving a point-in-time record of upstream component configuration
+- Nested composites, or composites in Power User Workspaces
 
 ## Context and constraints
 
-A catalog-entry component references a single-user catalog entry and becomes a
-child MCP server for each composite deployment. A multi-user component
-references an already-deployed shared server and becomes a per-user instance of
-it. A controller reconciles those children, connect and configure operations
-wait for it to finish, and requests to a running composite are served from the
-children rather than from the embedded manifests.
-
-Composites ship as catalog entries in remote sources alongside every other
-entry. Whatever replaces the embedded manifests has to survive being authored in
-a source and resolved on every sync.
+Composite catalog entries ship in Git-synced catalogs alongside other entries,
+so whatever replaces the embedded manifests must survive being authored in Git
+and applied on every sync.
 
 Composites can act as a form of access control over MCP servers. An
 administrator may configure one to expose a chosen set of servers and tools to
@@ -96,366 +86,354 @@ granting access to the components it references.
 
 ## Proposed design
 
-A composite persists references and the state it owns; everything else resolves
-from the referenced objects when it is needed.
+### The composite catalog entry
 
-### Data model
-
-Remove the embedded manifests from the catalog and runtime composite config
-types. The runtime type gains `url` for the per-deployment value currently
-carried inside the embedded runtime manifest.
+The embedded component manifest is removed. A component of a composite catalog
+entry stores its reference, its tool overrides, its tool prefix, and one new
+field:
 
 ```text
-Before  # apiclient/types, persisted in the v1 spec manifest, client-authored
-
-# CompositeCatalogConfig.componentServers[]
-CatalogComponentServer
-├── catalogEntryID | mcpServerID
-├── manifest        # embedded MCPServerCatalogEntryManifest of the component
-├── toolOverrides   # curated allowlist, renames, descriptions
-└── toolPrefix
-
-# CompositeRuntimeConfig.componentServers[]
-ComponentServer
-├── catalogEntryID | mcpServerID
-├── manifest        # embedded MCPServerManifest of the component, holding the
-│                   # per-deployment URL
+MCPServerCatalogEntry.manifest.compositeConfig.componentServers[]
+├── catalogEntryID | mcpServerID   # the upstream component
 ├── toolOverrides
 ├── toolPrefix
-└── disabled        # per-deployment
-
-After
-
-CatalogComponentServer            ComponentServer
-├── catalogEntryID | mcpServerID  ├── catalogEntryID | mcpServerID
-├── toolOverrides                 ├── toolOverrides
-└── toolPrefix                    ├── toolPrefix
-                                  ├── disabled  # per-deployment
-                                  └── url       # per-deployment
+└── sourceDigest                   # see "Generating tool overrides"
 ```
 
-### Reading a composite
+Component manifests are read from the referenced objects instead, so editing an
+upstream catalog entry changes what every composite referencing it reports, and
+writes nothing to those composites.
 
-The single-object reads — `GET /api/mcp-servers/{mcp_server_id}` and
-`GET /api/mcp-catalogs/{catalog_id}/entries/{entry_id}` — gain
-`compositeComponents`, a response-only list computed per request, never
-persisted, and ignored if a client includes it in a write. List responses keep
-the aggregate state they already report and omit the per-component detail, so
-the deploy, reconfigure, consent, and curation flows read one object before
-opening.
+Single-object reads of the entry gain `compositeComponents`, computed per
+request and never persisted:
 
 ```text
-Wire only  # apiclient/types, computed per request, never persisted
-
 MCPServerCatalogEntry.compositeComponents[]
-CatalogCompositeComponentDetails
 ├── catalogEntryID | mcpServerID
-└── manifest              # MCPServerCatalogEntryManifest of the live source
-
-MCPServer.compositeComponents[]
-CompositeComponentDetails
-├── catalogEntryID        # empty for a multi-user component
-├── mcpServerID           # the component server, or the shared server
-├── manifest              # MCPServerManifest of what is running
-├── needsUpdate           # this component's own drift
-├── deploymentStatus      # this component's own status
-└── MCPServerConfigState  # configured, missingRequiredEnvVars,
-                          # missingRequiredHeaders, missingOAuthCredentials,
-                          # needsURL, previousURL
+├── name, icon
+├── manifest             # the referenced catalog entry's manifest, or the
+│                        # referenced multi-user server's in catalog-entry form
+├── missing
+└── toolOverridesStale
 ```
 
-A catalog-entry read resolves each reference to its current upstream catalog
-entry or shared server. A composite-server read resolves the children that are
-actually running, reusing the component servers it already loads to report
-aggregate configuration state. A reference whose source has been
-deleted is reported as a missing component rather than failing the read.
+The catalog entry page and the tool-override authoring UI render from it. List
+responses omit it and keep the aggregate fields they report today, so rendering
+a catalog page does not resolve every component of every entry.
 
-### Authoring and syncing composite entries
+### Generating tool overrides
 
-Creating or updating a composite entry validates each reference against the live
-object it names: the reference must resolve within the composite's catalog, a
-`catalogEntryID` must name a single-user, non-composite entry, and an
-`mcpServerID` must name a multi-user server. A reference that does not resolve
-rejects the write — today creation silently drops such a component, and updates
-do not check at all.
+Tool overrides are authored against previews generated from a component's
+upstream catalog entry. The preview response now also returns a digest of that
+upstream's *runtime identity* — its runtime configuration block and environment
+variable keys, and nothing else — and saving the overrides stores that digest as
+the component's `sourceDigest`.
 
-A source-synced composite resolves the same way. Portable references — an entry
-key within the same source, or a source-qualified key across sources — still
-resolve to stored entries on every sync, but resolution no longer embeds
-anything. A reference that cannot be resolved remains a sync error that skips
-the entry rather than publishing one that cannot deploy.
+A name, icon, description, or resource limit cannot change which tools a server
+serves, so editing one leaves the digest unchanged.
 
-`POST /api/mcp-catalogs/{catalog_id}/entries/{entry_id}/refresh-components` is
-removed. Nothing is left for it to refresh.
+### Detecting stale tool overrides
 
-Deleting a component source is not blocked by the composites that reference it,
-and the dangling reference behaves as removed wherever it is consumed: the entry
-read reports the component as missing, a new deployment materializes without it,
-and a deployed composite reports a pending update — its membership now differs
-from what the entry can deploy — whose adoption deletes the orphaned child. The
-stored reference itself disappears the next time the composite is edited, and a
-source-synced composite whose source still carries the reference reports a sync
-error until the source is fixed.
+Each pass, the catalog entry controller recomputes every upstream's
+runtime-identity digest and compares it with the component's stored
+`sourceDigest`. A difference means the overrides were authored against a
+different version of that upstream. What it finds goes on the entry's status:
 
-### Deploying a composite
+```text
+MCPServerCatalogEntry.status
+├── components[]     # per component: catalogEntryID | mcpServerID, name, icon,
+│                    # toolOverridesStale, missing
+├── needsUpdate      # any component stale or missing
+└── manifestHash     # excludes sourceDigest
+```
 
-Creating a composite server records the component references, overrides, and
-prefixes from its entry, plus the user's `url` and `disabled` choices. The
-materializing controller then reconciles membership only:
+`toolOverridesStale` is set when the digests differ, `missing` when the
+reference does not resolve. `name` and `icon` are copied from the upstream each
+pass and kept at their last values once it stops resolving, so the entry can
+still render a deleted component. `manifestHash` is computed with `sourceDigest`
+excluded, so a regeneration that produces identical overrides does not move
+`lastUpdated`. `compositeComponents` carries these fields through, with
+`manifest` resolved per request.
 
-- create a child server for a new catalog-entry reference from the live entry;
-- create an instance for a new multi-user reference;
-- delete a child whose reference was removed; and
-- never rewrite an existing child.
+A component with no overrides, or no digest, is never marked stale. Git-authored
+entries and pre-existing composites carry no digest.
 
-A child server is built from the component entry's current manifest and carries
-its own catalog entry reference like any standalone server. Configure operations
-resolve URL templates and hostname constraints from the live entry and persist
-only the user's `url` on the component. Static OAuth credentials and the
-configuration they authenticate now resolve from the same live catalog entry, so
-a live credential can no longer be paired with stale embedded configuration.
+Regenerating previews for a stale component keeps today's merge: existing
+overrides are matched by tool name and preserved, tools the upstream dropped
+fall out, and tools it added arrive enabled in the dialog. Nothing changes until
+the administrator saves, which stamps the new digest and clears the flag.
 
-### Drift and updates
+### Creating a composite MCP server
+
+The composite MCP server loses its embedded manifests too. A component keeps the
+same reference, tool overrides, and tool prefix, plus which components this
+deployment has turned off:
+
+```text
+ComponentServer
+├── catalogEntryID | mcpServerID
+├── toolOverrides
+├── toolPrefix
+└── disabled
+```
+
+Creating a composite MCP server records those and nothing else. Everything the
+deployment needs is resolved by the controller from the upstream catalog entries
+at the moment it creates each component server. Two things follow: validation
+moves into the controller, and callers need a way to tell when membership has
+settled.
+
+The composite controller materializes membership. Each resolvable catalog-entry
+reference becomes a component server built from the upstream catalog entry's
+current manifest, carrying that entry reference so it is an ordinary MCP server
+that detects its own drift and updates itself. Each multi-user reference becomes
+an `MCPServerInstance` of the upstream component server, and the controller
+keeps the instance's multi-user configuration in sync with that server, which
+owns its own lifecycle.
+
+The controller validates each component manifest as it creates or updates the
+component server. Validation cannot stay up front at the API layer: the upstream
+catalog entry can change between the request and the moment the controller
+resolves it, so the manifest the API would have validated is not necessarily the
+one that gets written. Validating where the write happens is what resolving live
+costs, in exchange for dropping the immutable snapshot that made up-front
+validation sound. A failure is recorded against that component and stops work on
+it alone:
+
+```text
+v1.MCPServer.Status
+└── componentErrors   # component reference -> error; absent means healthy
+```
+
+An unresolvable reference is skipped the same way. Partial composite MCP servers
+deploy, configure, and serve the components they have.
+
+The settled signal is another new status field:
+
+```text
+v1.MCPServer.Status
+└── observedGeneration   # the last spec generation the controller fully reconciled
+```
+
+The controller sets it at the end of any pass in which every component has been
+created, left alone, skipped, or recorded in `componentErrors`, so a degraded
+composite still settles. The create and connect paths wait briefly for it to
+reach the spec generation, then read component detail. On timeout they return
+the composite MCP server with its current component detail rather than an error.
+
+Single-object reads of a composite MCP server gain their own
+`compositeComponents`, resolved from its component servers and instances rather
+than from upstream entries — this reports what is deployed, not what is
+available:
+
+```text
+MCPServer.compositeComponents[]
+├── catalogEntryID | mcpServerID
+├── mcpServerName     # the component server, or the upstream component server
+├── manifest          # what that server is running
+├── needsUpdate       # its own drift against its own upstream
+├── error             # from componentErrors
+└── configured, missingRequiredEnvVars, missingRequiredHeaders,
+    missingOAuthCredentials, needsURL, previousURL
+                      # per component, same meaning as on a standalone server
+```
+
+One object serves the deploy, reconfigure, consent, and tool-override flows,
+including for a user with no read access to the upstream components.
+
+Configuring resolves URL templates and hostname constraints from the upstream
+catalog entry and writes each component's URL and credentials onto its component
+server — a remote component's URL is that server's own deployment state. A
+multi-user component is configured through its own instance credential, as it is
+for a direct connection to the upstream server; nothing is written to that
+server. A component whose server does not exist is reported in the response's
+component detail and its values are not applied.
+
+### Detecting that an update is available
+
+Drift detection skips component servers today, and a composite's drift is
+computed by comparing its embedded snapshots against the entry's. Both change.
+
+A component server detects drift against its own upstream catalog entry through
+the existing mechanism, and reports it as its own `needsUpdate`.
+
+A composite MCP server reports `needsUpdate` when its membership, tool
+overrides, or tool prefixes differ from its composite catalog entry, or when any
+of its component servers reports drift. A multi-user component's shared server
+owns its own lifecycle and its drift is not rolled up, because a composite
+update cannot clear it. Drift detection computes the combined value each pass
+and writes it to status rather than leaving it to be computed per read, because
+list responses drive the update badge and bulk update but carry no component
+detail. The single-object read reports each component server's own
+`needsUpdate`, so the UI can say which component is behind.
+
+### Viewing the diff
+
+The diff changes shape because the manifests being diffed are now slim. **View
+diff** on a composite MCP server diffs its manifest against its composite
+catalog entry's, which yields exactly the composite's own delta: components
+added, components removed, tool override and prefix changes. `disabled` and
+`sourceDigest` are stripped so deployment state and bookkeeping never read as
+changes. Each component server has its own diff against its own upstream catalog
+entry, so an administrator can see a component's manifest changes without the
+composite composing them.
+
+### Updating a composite MCP server
+
+Updating a composite MCP server no longer starts by refreshing its catalog
+entry. With nothing embedded there is nothing to refresh, so `POST
+.../entries/{entry_id}/refresh-components` is removed and the two-step process
+collapses into one action.
+
+The update endpoint rebuilds the composite MCP server's manifest from its
+composite catalog entry — taking membership, tool overrides, and tool prefixes
+from the entry and carrying each surviving component's `disabled` forward, since
+`disabled` has no counterpart on the entry — validates it, and writes it
+together with a new spec field:
+
+```text
+v1.MCPServer.Spec
+└── update   # set by the update endpoint, consumed by the composite controller
+```
+
+Both land in one write and the endpoint returns without waiting.
+
+Today the endpoint merges the stored manifest over the rebuilt one, which lets
+stored fields shadow the entry's changes permanently. The rebuilt manifest
+therefore takes administrator overrides only from the request body; an override
+that is not resent is not carried over.
+
+The composite controller consumes `update`: it rebuilds every enabled component
+server from its upstream catalog entry, preserving the component's URL when it
+still satisfies the hostname constraint, validates each rebuilt manifest before
+writing it, and clears the field only after all component work. The update runs
+in the controller: an interrupted pass retries, a failing component stops no
+sibling, and a component already matching its upstream is not rewritten. A
+rewritten component server is shut down softly — its deployment is recreated on
+the next request and its volumes survive.
+
+Membership reconciliation runs against the newly adopted manifest, so a
+component the entry added is created and a component it removed is deleted.
+Deletion is the only path that removes a component server, and an unresolvable
+reference is never treated as a removed member.
+
+### Updating a single component server
 
 Component servers use the existing drift, diff, and update flow against their
-own catalog entries. Today both halves are switched off for composite children:
-drift detection skips any server with a composite parent, and
-`POST .../mcp-servers/{mcp_server_id}/trigger-update` rejects component servers
-outright. Both exclusions are removed. An administrator updates a component from
-the existing deployment view without touching its siblings or the composite's
-curation, and **View diff** on a component compares its configuration against
-its own catalog entry.
+own upstream catalog entries. Four exclusions are removed: drift detection skips
+servers with a composite parent, the update endpoint rejects them, the general
+server list hides them, and the deployment view's update action excludes them.
+No composite-specific update path is added. Component servers then appear with
+**Update** and **View diff** in the administrator deployment view, and updating
+one touches neither its siblings nor the composite's tool overrides.
 
-A composite server reports `needsUpdate` when its membership, overrides, or
-prefixes differ from its catalog entry, or when any enabled component reports
-its own. Clients that need to tell the two apart read the per-component details.
-**View diff** on the composite compares its curation — membership, overrides,
-and prefixes — against its entry; `url` and `disabled` belong to the deployment
-and never appear in a diff. A composite catalog entry itself reports no update
-state: its response always presents current sources, so the entry-level
-`needsUpdate` that today tracks snapshot drift is removed along with the
-snapshots.
+### Deleting an upstream component
 
-Updating a composite applies components first, then curation:
+Deleting an upstream catalog entry that composites reference returns the same
+409-with-dependencies response that deleting a referenced multi-user server does
+today, with a force option that hard-deletes — an administrator otherwise has no
+way to know which composites depend on it.
 
-1. Attempt every pending member component update. Failures are reported per component
-   and do not stop the others.
-2. Adopt the composite's own catalog changes — membership, overrides, and
-   prefixes, preserving each surviving component's `url` and `disabled` — only
-   once every component update has succeeded.
+Force is safe because a composite tolerates missing components. Running
+composite MCP servers keep operating on their component servers' last manifests,
+new deployments materialize without the missing component, and the composite
+catalog entry reports it as `missing`, rendered from the stamped name and icon,
+until an administrator removes the reference.
 
-The order is forced by curation semantics. Tool overrides are an allowlist keyed
-by tool name, curated against a component's tool list at a moment in time. A
-component that is newer than its curation is safe: unknown tools stay hidden and
-overrides for removed tools sit inert. Curation that is newer than a deployed
-component is not: it can enable or rename tools the running component does not
-serve, silently shrinking the composite's exposed tool set. Updating components
-before adopting curation keeps every intermediate state in the safe direction,
-which is also why there is no separate update-all action — one **Update** on the
-composite adopts everything it is behind on. A partial failure leaves the
-curation unadopted and the action retryable, with already-updated components
-no-ops on retry.
+### When an upstream is removed from Git, or is invalid
 
-Composite health stops being a constant. `deploymentStatus` on a composite
-becomes the worst status among its enabled components, a multi-user component
-contributing its shared server's status and a disabled component contributing
-nothing.
+A reference that does not resolve is no longer an error that blocks the whole
+entry. The catalog sync controller applies a composite catalog entry as
+authored; skipping it, as it does today, would remove the whole composite from
+the catalog over one missing component. The dangling reference surfaces as
+`missing`, the same signal a deleted upstream produces.
 
-### Configuration and tool curation
+Creating a composite catalog entry through the API rejects a reference that does
+not resolve. Updating one does not re-check references: creation is the only
+moment a typo is distinguishable from an upstream deleted later, and an entry
+whose component was deleted must stay editable so the administrator can fix it.
 
-Deploy, reconfigure, and OAuth consent forms read the component details and
-continue submitting configuration in one composite request. The existing
-per-component reveal behavior remains unchanged.
-
-Tool curation keeps its current preview-and-save flow. The preview starts an
-ephemeral server from the live component entry rather than an embedded manifest.
-Saved overrides remain an allowlist: new tools stay hidden on a curated
-component, removed tools leave inert overrides, and a component with no
-overrides continues to expose all tools. Updating a component never changes the
-composite's saved curation.
-
-### User interface
-
-The composite catalog-entry page loses its refresh banner, its refresh action,
-its update badge, and the per-component diff dialog that compares each embedded
-manifest with its live source. Component cards render live component details.
-
-The composite server page keeps its update indicator, its **Update** action now
-applies pending component updates before the composite's own changes, and its
-**View diff** narrows to the composite's own curation. Component servers regain
-**Update** and **View diff** in the administrator deployment view, each
-component's configuration reviewed against its own catalog entry. End-user
-configuration flows are unchanged.
+An upstream that resolves but whose manifest is invalid — a removed tunnel
+reference, a lowered resource maximum — fails validation when the controller
+tries to create or update that component server. The error lands in
+`componentErrors` and surfaces on the component's detail; the rest of the
+composite is unaffected.
 
 ## Alternatives considered
-
-**Automatically snapshot component manifests.** A controller could refresh every
-dependent composite whenever a source changes, removing the manual refresh while
-keeping the embedded shape. It retains the duplicate state and the
-whole-composite adoption step, and it turns every source edit into write
-amplification across all dependent composite entries — with the deployment-level
-update still to perform afterward. It also forfeits the review point the manual
-refresh at least implied, without gaining the per-component update this proposal
-is after.
-
-**Embed the manifests in status.** Moving the snapshot from spec to status keeps
-reads self-contained and takes manifests out of the write path. But the
-duplicate state remains, every source edit still fans out into status writes
-across every dependent composite, and a status-resident cache can go stale in
-exactly the ways the embedded spec does today — it changes where the copy lives,
-not that there is a copy.
-
-**Fetch each component separately.** Clients could resolve component references
-themselves against the existing catalog-entry and server APIs. That turns one
-configuration read into a request per component, and it breaks the
-access-control use: a user who may deploy a composite without read access to its
-components would fail before deployment on reads the composite is supposed to
-encapsulate.
-
-**Hydrate the existing manifest fields on read.** Keeping the wire shape and
-filling `manifest` from the live source on every read would avoid client
-changes. But stored and computed data become indistinguishable in a single
-field, and a write that includes a manifest is either silently discarded or
-accepted as state the server no longer honors — both worse than a shape that
-says what it is.
 
 **Composite-specific storage and APIs.** Dedicated types would give composites
 cleaner boundaries than config structs inside the shared manifest. Getting there
 means migrating the catalog, deployments, Git sources, configuration flows, and
-UI in one motion, none of which is necessary to remove the embedded manifests;
-it remains open as a later refactor.
+UI in one motion, none of which is necessary to remove the embedded manifests.
 
 ## Trade-offs
 
-Removing the embedded manifests also removes a point-in-time record of source
-configuration. Each child manifest still records what is running, but a catalog
-composite always reflects its current sources. The composite server's update
-flag combines parent curation drift with component drift, so clients must
-inspect component details to distinguish them. And because curation adoption
-waits for every component update to succeed, one failing component holds the
-composite's own changes back until it is fixed — the price of never letting
-curation run ahead of a deployed component.
-
-In exchange, source changes no longer amplify into writes across composite
-entries, component deployments use the standard reviewable update path, and live
-credentials cannot be paired with stale embedded configuration.
-
-## Risks and open questions
-
-### A composite entry no longer pins what it deploys
-
-The embedded manifest is an exact, reproducible record of the component
-configuration a composite intends to deploy, and tool overrides are curated
-against that exact manifest. With only a reference stored, what a composite
-deploys depends on when it is deployed, two deployments made at different times
-can differ with no change to the composite itself, and overrides are no longer
-anchored to a known component revision.
-
-### New deployments see component changes immediately
-
-Existing deployments still require an explicit update, but catalog presentation
-and new deployment forms reflect a changed component with no review by the
-administrator who published the composite entry, or by whoever controls its Git
-source when the entry is source-synced.
-
-### Should stale tool curation be signaled?
-
-Overrides stay safe when a component's tool list changes, but safe is not
-current: nothing tells an administrator that re-curation could expose useful new
-tools or clear dead overrides, and with the embedded manifest gone the composite
-no longer holds the state its curation was authored against. The proposed
-direction records just enough to detect the divergence:
-
-1. Generating tool previews for a component returns the digest of the component
-   source's current manifest alongside the previews.
-2. Saving the curation stores that digest as the component's `sourceDigest`. A
-   source-synced composite stamps the digest when sync first resolves the
-   component and restamps it whenever the component's overrides change,
-   preserving it otherwise.
-3. A controller compares each component source's current digest against the
-   stored `sourceDigest` and records a per-component `toolOverridesNeedUpdate`
-   in the entry's status, setting an entry-level `needsUpdate` when any
-   component is flagged.
-4. Both flags flow through the entry response: `needsUpdate` drives the catalog
-   entry's status badge, and `toolOverridesNeedUpdate` on the component details
-   drives a badge on each affected component.
+- Removing the snapshots removes the point-in-time record of upstream
+  configuration: two deployments made at different times can differ with no
+  change to the composite catalog entry. Each component server's manifest still
+  records what is running.
+- A composite MCP server's stored `needsUpdate` combines its own drift with
+  drift in its component manifests; only single-object reads distinguish them.
 
 ## Rollout and migration
 
-Backend and UI ship in one release with no phased gate: the refresh action and
-the component details replace one another, and no compatibility window exists in
-which both shapes are written.
+Backend and UI ship together; no data migration. Stored composites decode into
+the slim types, dropping the removed fields on read and persisting the slim
+shape on their next ordinary write. Component servers already carry their own
+manifests, including per-deployment URLs, so nothing is lost.
 
-There is no data migration. Stored composites decode into the slim types — the
-removed fields are dropped on read — and each object persists the slim shape on
-its next ordinary write. The one value that would otherwise be lost is the
-per-deployment URL, which today lives inside the embedded runtime manifest of a
-remote component whose catalog entry constrains a hostname. A one-time pass at
-upgrade copies that value into `url` on each existing composite server before
-anything is written slim. Components with a fixed or templated URL need no
-backfill, because those values come from the component entry.
+The 409-with-force protection on deleting an upstream component catalog entry
+ships after everything else. Until it lands, a deletion behaves as it does today
+and the composite degrades to a missing component.
 
-**Observability.** Component drift that the embedded manifests concealed becomes
-visible as pending updates on component servers and on their composites, so the
-number of composites reporting a pending update rises at rollout with nothing
-having changed upstream. Release notes should say so, or it reads as a
-regression.
+Component drift the embedded manifests concealed becomes visible at rollout, so
+the number of composites reporting a pending update will jump even though
+nothing changed upstream. Release notes must say so.
 
-**Rollback.** Not supported. A build that expects embedded manifests reads a
-slim composite as having no component configuration, and membership
-reconciliation applies that emptiness to the children, deleting component
-servers and their credentials.
+Rollback is not supported. Only each component's manifest is removed, not the
+component list, so a build expecting embedded manifests decodes every
+component's manifest as empty and overwrites each component server's manifest
+with it.
 
 ## Testing and validation
 
-Validation follows the lifecycle, in the order an administrator and a user meet
-it.
+**Authoring.** Creating a composite catalog entry with an unresolvable reference
+is rejected; updating an entry whose component was deleted succeeds. A
+Git-synced entry with a dangling reference is applied and reports the component
+missing. Entry responses carry hydrated component manifests and store none;
+editing an upstream component catalog entry changes what the composite entry
+reports with no write to it.
 
-**Authoring a composite.** A composite catalog entry is created through the API
-and through a remote source, with a catalog-entry component and a multi-user
-component. Its response carries component details resolved from the live entries
-and shared servers, and stores no component manifest. Editing a component entry
-changes what the composite entry reports on its next read, with no write to the
-composite and no change to anything already deployed.
+**Deploying and configuring.** A composite MCP server created from references
+materializes a component server or instance per resolvable reference and deploys
+without the rest. A user with no access to the upstream components configures
+every component from the composite's own response, one request; connecting
+reaches each component's tools under the composite's prefixes and tool
+overrides.
 
-**Validating references.** A reference that does not resolve rejects the write,
-as does a `catalogEntryID` naming a composite or a multi-user entry, and an
-`mcpServerID` naming a single-user server. A remote source carrying those same
-references reports them as sync errors rather than publishing an entry that
-cannot be repaired afterward. A `compositeComponents` field sent in a write
-payload is ignored rather than stored. Deleting a component entry after
-authoring leaves the composite readable and deployable, reporting that component
-as missing and deploying without it, while a source that still carries the
-reference reports a sync error.
+**Updating.** Changing a non-runtime field of an upstream component catalog
+entry sets `needsUpdate` on the component server and on its composite MCP
+server, and leaves the composite catalog entry's `needsUpdate` false — the entry
+reports tool-override staleness, not manifest drift. Updating the component
+server alone adopts the change and touches nothing else. Updating the composite
+MCP server adopts the entry's membership, tool overrides, and prefixes and
+updates every enabled component server from its own catalog entry; a failing
+component reports its error, stops no sibling, and a retry is a no-op for the
+rest. Volumes survive a component rebuild driven by a composite update; a
+component updated directly follows the standard update path, which shuts the
+server down hard.
 
-**Configuring and connecting as a user.** A user who can read the composite but
-none of its components deploys it, and the deploy form renders every component's
-environment variables, headers, and hostname from the composite's own response.
-One configure request carries values for all of them and the composite reports
-itself configured only once every enabled component is. Connecting through the
-composite reaches each component's tools under the composite's prefixes and curated
-set, and a component requiring interactive OAuth completes consent through the composite.
+**Tool override staleness.** Changing an upstream component catalog entry's
+runtime configuration sets `toolOverridesStale` on that component and
+`needsUpdate` on the composite catalog entry; changing its description sets
+neither. Regenerating and saving clears `toolOverridesStale` and preserves
+untouched overrides. Components of Git-authored entries are never marked stale.
 
-**Updating.** Changing a component entry leaves the deployment serving its
-original configuration, and reports a pending update on that component server
-and on its composite. Updating the component alone adopts the change, leaves its
-siblings untouched, and leaves both the composite's saved curation and its
-curated tool set unchanged, whether the component gained or dropped a tool.
-Updating the composite updates pending components first and adopts the entry's
-membership, overrides, and prefixes only after all of them succeed, preserving
-each surviving component's `url` and `disabled`; a failing component is reported
-individually, stops neither its siblings nor a later retry, and leaves the
-composite's curation unadopted. Composite deployment status follows the worst
-enabled component and a disabled component contributes nothing. A composite
-catalog entry reports no update state throughout, while the catalog list still
-highlights it when one of its deployments is pending.
-
-**Migrating an existing composite.** A composite created before the change
-reads, deploys, configures, and connects unchanged, then persists the slim shape
-on its next write with its per-deployment URL preserved by the upgrade backfill.
-Rotating a component's static OAuth credential takes effect with no update, and
-rotating it alongside that component's configuration surfaces as an ordinary
-pending update on the component server.
+**Deleting an upstream.** Deleting a referenced upstream component catalog entry
+409s with the dependent composites; force deletes it. Running composite MCP
+servers keep serving, the composite catalog entry renders the missing component
+by its stamped name and icon, and removing the reference deletes the component
+server and its credentials.
 
 ## References
 
