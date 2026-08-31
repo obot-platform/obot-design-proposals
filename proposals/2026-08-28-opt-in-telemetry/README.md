@@ -92,7 +92,8 @@ Telemetry will use the existing relationship with upgrade-server but will remain
 
 - Add telemetry transport behavior to the existing `pkg/upgrade` client.
 - Keep the daily telemetry operation associated with the existing upgrade-check schedule, while ensuring the upgrade check continues independently of consent and telemetry failures.
-- Separate scheduled upgrade-check orchestration from `pkg/api/handlers`, because it is background work rather than an API handler, and place the telemetry scheduler alongside it in a new package (package name and boundary TBD). If pursued, this refactor will be delivered in an independent PR.
+- In an independent PR, move upgrade-check initialization, scheduling, transport, and state into a focused `pkg/upgrade.Checker`. `VersionHandler` will remain in `pkg/api/handlers` and read the checker's status through a small interface; telemetry orchestration will remain separate.
+- Place telemetry collection and scheduling in `pkg/producttelemetry`. Start its context-bound daily background job during `pkg/services.New`, after the gateway client and other collection dependencies are available.
 - Define consent and payload types in Obot's API client module so the telemetry handler can import the shared contract.
 - Send a JSON `POST` to upgrade-server containing the existing installation ID and only the aggregate fields authorized by the persisted functionality identifiers.
 - Use enums for telemetry functionality identifiers. The initial release may define one identifier covering all metrics in **Initial telemetry scope**.
@@ -126,8 +127,6 @@ Use gRPC between Obot and upgrade-server. gRPC offers a structured contract and 
 ## Risks and open questions
 
 - **User trust:** Even aggregate telemetry may make users uncomfortable. Mitigate this with explicit opt-in, plain-language disclosure, complete public field documentation, and an Owner-only control that can disable collection immediately.
-- **Package ownership:** What package should own background upgrade and telemetry scheduling after it moves out of `pkg/api/handlers`?
-- **Shared contracts:** Which API client package should own the consent identifiers and payload types?
 
 ## Rollout and migration
 
