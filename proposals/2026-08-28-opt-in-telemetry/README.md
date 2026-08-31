@@ -30,21 +30,20 @@ Installation-level telemetry will provide evidence for prioritizing improvements
 - Collect the aggregate metrics defined in the initial telemetry scope once per day from installations whose Owner has explicitly opted in.
 - Preserve existing upgrade-check behavior regardless of whether telemetry consent is undecided, granted, or denied.
 - Record exactly which telemetry functionality identifiers an Owner approved so future identifiers require separate consent.
-- Allow an Owner to review and change the installation-level choice without restarting Obot.
 - Keep telemetry failures isolated from normal Obot operation.
 - Maintain compatibility as consent identifiers and payload fields evolve.
 
 ### Initial telemetry scope
 
-The initial functionality identifier covers these metrics from the related issue:
+The initial release defines one stable consent identifier for each telemetry type:
 
-- Total number of users.
-- Number of active users during the previous full UTC day.
-- Total number of deployed MCP servers.
-- For each server from Obot's built-in catalog: its stable name and ID, deployment count, and aggregate user usage count.
-- Configured authentication-provider type.
-- Number of MCP audit-log records created during the previous full UTC day.
-- Number of LLM audit-log records created during the previous full UTC day.
+- `TotalUsers`: total number of users.
+- `ActiveUsers`: number of active users during the previous full UTC day.
+- `DeployedMCPServers`: total number of deployed MCP servers.
+- `BuiltInMCPServerUsage`: for each server from Obot's built-in catalog, its stable name and ID, deployment count, and aggregate user usage count.
+- `AuthProviderType`: configured authentication-provider type.
+- `MCPAuditLogCount`: number of MCP audit-log records created during the previous full UTC day.
+- `LLMAuditLogCount`: number of LLM audit-log records created during the previous full UTC day.
 
 ## Non-goals
 
@@ -53,6 +52,7 @@ The initial functionality identifier covers these metrics from the related issue
 - Collecting usernames, email addresses, user IDs, prompts, responses, audit-log contents, credentials, URLs, exact error messages, or other potentially identifying values.
 - Defining an exhaustive long-term telemetry schema in the initial release.
 - Providing fine-grained per-functionality selection in the initial consent UI. The persisted representation supports that option later, but the first UI remains all-or-nothing for the identifiers it discloses.
+- Providing UI or API controls to view or change consent after the initial choice. In the initial implementation, changing a recorded choice requires direct database modification.
 
 ## Context and constraints
 
@@ -73,10 +73,9 @@ Telemetry will use the existing relationship with upgrade-server but will remain
 
 ### Compatibility and privacy constraints
 
-- Persist consent at installation scope in the existing properties table as a key/value property whose value is a JSON list of stable functionality identifiers.
 - Absence of an identifier means its collection is not authorized. A future release must not automatically add new identifiers to an installation's recorded consent.
 - Send only aggregate installation-level values and maintain public documentation of every collected field and its cadence.
-- Add and remove payload fields without breaking supported Obot or upgrade-server versions.
+- Evolve payloads through additive optional fields. Deprecated fields may stop being populated but remain part of the compatible wire shape while supported versions still recognize them.
 
 ## Proposed design
 
@@ -85,35 +84,61 @@ Telemetry will use the existing relationship with upgrade-server but will remain
 - Show the telemetry choice only to Owners in the modal displayed during Owner login.
 - Continue prompting Owners until one Owner explicitly opts in or opts out. Closing or dismissing the modal does not constitute consent.
 - Present explicit opt-in and opt-out choices, explain what is collected and why, and link to complete public telemetry documentation.
-- Persist the decision at installation scope so other Owners are not prompted for the same disclosed functionality identifiers.
-- The initial UI presents one all-or-nothing choice. Opt-in writes all functionality identifiers disclosed by that UI; opt-out leaves the set empty or removes those identifiers.
+- Persist consent at installation scope in the existing properties table under the `product_telemetry_consent` key as a JSON list of stable functionality identifiers. A missing property means consent is undecided; a present `[]` value means the Owner explicitly opted out.
+- The initial all-or-nothing UI stores every identifier listed in **Initial telemetry scope** for opt-in or `[]` for opt-out.
+- The initial implementation does not expose the recorded choice or allow it to be changed through the UI or API.
 
 ### Collection and transport
 
-- Add telemetry transport behavior to the existing `pkg/upgrade` client.
-- Keep the daily telemetry operation associated with the existing upgrade-check schedule, while ensuring the upgrade check continues independently of consent and telemetry failures.
+- Reuse the installation-ID helper from `pkg/upgrade`, but keep telemetry collection, transport, and scheduling out of the upgrade-check module.
 - In an independent PR, move upgrade-check initialization, scheduling, transport, and state into a focused `pkg/upgrade.Checker`. `VersionHandler` will remain in `pkg/api/handlers` and read the checker's status through a small interface; telemetry orchestration will remain separate.
-- Place telemetry collection and scheduling in `pkg/producttelemetry`. Start its context-bound daily background job during `pkg/services.New`, after the gateway client and other collection dependencies are available.
-- Define consent and payload types in Obot's API client module so the telemetry handler can import the shared contract.
+- Place telemetry collection, transport, and scheduling in `pkg/producttelemetry`. Start its independent, context-bound background job during `pkg/services.New`, after the gateway client and other collection dependencies are available. The job runs immediately and then every 24 hours at a fixed time, checking the current consent property on every run even when consent is undecided or opted out.
+- Define consent and payload types in `apiclient/types` so `pkg/producttelemetry` can import the shared contract.
 - Send a JSON `POST` to upgrade-server containing the existing installation ID and only the aggregate fields authorized by the persisted functionality identifiers.
-- Use enums for telemetry functionality identifiers. The initial release may define one identifier covering all metrics in **Initial telemetry scope**.
+- Represent each telemetry type with its own enum identifier and associate its collector and payload fields with that identifier.
 - Use a dynamic mapping from recognized, consented identifiers to collector functions. The implementation will loop through enabled enums and construct the payload using only those fields.
-- Design JSON payloads to be backwards-compatible with append-only struct fields
+- Design JSON payloads to be backward-compatible with append-only struct fields.
+
+### Payload shape
+
+The payload identifies a report by installation and UTC report date. `reportedAt` determines which of multiple reports for that date is newer. Optional scalar and count fields are pointers in the Go payload types: `null` means the metric could not be collected, while a non-null zero means it was collected and the measured value was zero.
+
+```json
+{
+  "installationID": "7d7d83d8-2af0-4da8-ae2d-102d8eaa70be",
+  "reportedAt": "2026-08-31T00:04:12Z",
+  "metrics": {
+    "totalUsers": 42,
+    "activeUsers": null,
+    "deployedMCPServers": 0,
+    "builtInMCPServers": [
+      {
+        "id": "github",
+        "name": "GitHub",
+        "deploymentCount": 2,
+        "userCount": 7
+      }
+    ],
+    "authProviderType": "github",
+    "mcpAuditLogCount": 0,
+    "llmAuditLogCount": null
+  }
+}
+```
 
 ### Failure behavior
 
 - A missing, empty, or unrecognized consent set results in no additional telemetry request.
 - Collection or delivery failure must not fail the upgrade check or affect normal Obot operation.
+- Failure to initialize or run product telemetry must be logged but must not prevent Obot from starting.
 - Existing upgrade-check requests remain unchanged.
-- Use exponential backoff for retries to prevent missed data. Since it is reported once daily, the destination can handle duplicates.
+- Retry failed delivery with exponential backoff using the same report identity and `reportedAt` value. Reports are keyed by installation ID and report date; when more than one report exists for that key, the report with the newer `reportedAt` value replaces older data.
 
 ## Alternatives considered
 
 ### Status quo
 
-Continue operating without additional product telemetry. This avoids new collection and consent mechanisms, but leaves maintainers unable to quantify adoption or assess the compatibility impact of changes.
-
-The rough draft also states that “the status quo can still be maintained by an opt-out.” The intended meaning needs confirmation because explicit opt-out preserves current no-telemetry behavior, while the proposal otherwise requires opt-in before collection.
+Continue operating without additional product telemetry. This avoids new collection and consent mechanisms, but leaves maintainers unable to quantify adoption or assess the compatibility impact of changes. An explicit opt-out preserves this existing no-telemetry behavior.
 
 ### gRPC
 
@@ -126,7 +151,7 @@ Use gRPC between Obot and upgrade-server. gRPC offers a structured contract and 
 
 ## Risks and open questions
 
-- **User trust:** Even aggregate telemetry may make users uncomfortable. Mitigate this with explicit opt-in, plain-language disclosure, complete public field documentation, and an Owner-only control that can disable collection immediately.
+- **User trust:** Even aggregate telemetry may make users uncomfortable. Mitigate this with explicit opt-in, plain-language disclosure, and complete public field documentation. The initial release does not provide UI or API controls to review or change the recorded choice.
 
 ## Rollout and migration
 
@@ -141,7 +166,8 @@ Use gRPC between Obot and upgrade-server. gRPC offers a structured contract and 
 
 - Verify that undecided, empty, and unrecognized consent sets send no telemetry.
 - Verify that opt-in enables only collectors associated with persisted, recognized identifiers.
-- Verify Owner-only access, explicit opt-in/opt-out behavior, repeated prompting while undecided, and immediate disablement after opt-out.
+- Verify Owner-only access, explicit initial opt-in/opt-out behavior, repeated prompting while the consent property is missing, and no prompting after either choice creates the property.
+- Verify that the initial UI and API do not expose or modify an existing consent choice.
 - Verify previous-full-day calculations use UTC half-open boundaries and reuse the existing active-user definition.
 - Verify custom MCP servers and all prohibited customer-content fields are absent from generated payloads.
 - Verify collector and transport errors do not affect the upgrade check or other Obot behavior.
@@ -149,7 +175,7 @@ Use gRPC between Obot and upgrade-server. gRPC offers a structured contract and 
 ### Contract and integration
 
 - Verify request construction, schema compatibility, and malformed-response handling.
-- Verify retry and duplicate-delivery behavior once delivery semantics are selected.
+- Verify retries retain the same report identity and that a newer `reportedAt` report replaces older data for the same installation and report date.
 - Verify telemetry failures do not affect the existing upgrade-check path.
 - Add an end-to-end contract test using a representative authorized payload.
 
