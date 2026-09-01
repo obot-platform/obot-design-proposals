@@ -73,7 +73,7 @@ Telemetry must send only aggregate installation-level values, document every col
 
 - In an independent PR, move upgrade-check lifecycle and state into `pkg/upgrade.Checker`; `VersionHandler` will read its status through a small interface. This is not strictly necessary, but is an opportunity for clearer organization that was identified.
 - Put telemetry collection, transport, and scheduling in `pkg/producttelemetry`. Start its context-bound job during `pkg/services.New`; it runs immediately and then daily at a fixed time, reading consent on each run.
-- Reuse `pkg/upgrade` only for the installation ID. Define consent and payload types in `apiclient/types`.
+- Reuse `pkg/upgrade` only for the installation ID. Define payload types in `apiclient/types`.
 - Map each consent enum to its collector and payload fields, then send only authorized fields in a JSON `POST` to upgrade-server.
 
 ### Payload
