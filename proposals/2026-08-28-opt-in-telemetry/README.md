@@ -19,7 +19,7 @@ None.
 
 ## Problem and motivation
 
-Obot lacks aggregate adoption data for prioritizing features and evaluating the compatibility impact of changes such as the recent MCP catalog overhaul. This proposal adds narrowly scoped telemetry without collecting customer content or identifying custom configuration.
+Obot lacks aggregate adoption data for prioritizing features and evaluating the compatibility impact of changes such as the recent MCP catalog overhaul. This proposal adds narrowly scoped telemetry without collecting customer content (audit logs, custom MCP entries, MCP configurations, etc.) or system-level configurations that might contain customer details.
 
 ## Goals
 
