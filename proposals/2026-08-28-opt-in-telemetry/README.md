@@ -7,7 +7,7 @@
 
 Add installation-level product telemetry to understand Obot adoption and use of built-in capabilities. Move distribution and engine reporting from the upgrade check into this collection while also reporting the current version in both. Every installation reports these three operational fields; self-hosted installations add product-usage metrics after an Owner opts in, while Obot Cloud always adds them.
 
-For self-hosted installations, consent is stored as a set of stable telemetry identifiers. New identifiers introduced later are not authorized by an earlier opt-in.
+For self-hosted installations, consent is a boolean that Owners can review and change. Opt-in applies to current and future product-usage metrics.
 
 ## Related issues
 
@@ -24,12 +24,12 @@ Obot lacks aggregate adoption data for prioritizing features and evaluating the 
 ## Goals
 
 - Collect the initial aggregate metrics daily from opted-in self-hosted installations and Obot Cloud.
-- Preserve existing upgrade-check behavior and normal Obot operation.
-- Support compatible evolution of consent identifiers and payload fields.
+- Preserve existing upgrade-check behavior and normal Obot operation. Migrate metrics collected by upgrade-check to be part of the new API.
+- Support compatible evolution of payload fields.
 
 ### Initial telemetry scope
 
-The initial release defines one consent identifier per telemetry type:
+The initial product-usage metrics are:
 
 - `TotalUsers`: total users.
 - `ActiveUsers`: users active during the previous full UTC day.
@@ -43,7 +43,7 @@ The initial release defines one consent identifier per telemetry type:
 - `SentryEnforcementEventCount`: Sentry enforcement-decision records created during the previous full UTC day.
 - `ManagedSkillCount`: total skills managed from configured skill repositories at collection time.
 
-The following fields are not consent identifiers. Every report includes them as operational installation metadata independently of product-analytics consent:
+Every report also includes the following operational installation metadata independently of product-analytics consent:
 
 - `Distribution`: `Unlicensed`, `Community`, or `Enterprise` for self-hosted installations, and `Cloud` for Obot Cloud.
 - `Engine`: configured MCP runtime engine, normalized as it is for the existing upgrade check.
@@ -54,7 +54,7 @@ The following fields are not consent identifiers. Every report includes them as 
 - Collecting user-level activity, customer content, credentials, configuration values, URLs, exact errors, or other identifying data.
 - Reporting the identity or configuration of custom MCP servers.
 - Defining an exhaustive long-term telemetry schema.
-- Providing fine-grained consent choices or controls to view or change consent after the initial choice. Changing recorded consent initially requires direct database modification.
+- Providing per-metric consent choices.
 
 ## Context and constraints
 
@@ -69,7 +69,7 @@ Existing data sources include:
 - Aggregate user counts on built-in catalog entries.
 - Separately persisted MCP and LLM audit logs.
 
-Telemetry must send only aggregate installation-level values, document every collected field and its cadence, and evolve through additive optional fields. On self-hosted installations, an absent consent identifier never authorizes collection.
+Telemetry must send only aggregate installation-level values, document every collected field and its cadence, and evolve through additive optional fields. Self-hosted product-usage collection requires a `true` consent value.
 
 ## Proposed design
 
@@ -77,16 +77,16 @@ Telemetry must send only aggregate installation-level values, document every col
 
 - Show Owners an explicit all-or-nothing choice during login until one records a decision. Dismissing the modal is not consent.
 - Explain the collection and link to its complete public documentation.
-- Store consent in the installation-level `product_telemetry_consent` property as a JSON list. A missing property is undecided, `[]` is opted out, and opt-in stores every identifier in **Initial telemetry scope**.
-- Do not expose the recorded choice or allow changes through the initial UI or API.
-- Obot Cloud sets a new `OBOT_SERVER_PRODUCT_ANALYTICS_FORCE_ENABLED=true` environment variable. This supplies effective consent independently of the `product_telemetry_consent` property: enable every telemetry identifier, suppress the consent prompt, and provide no opt-out. The property is neither required nor authoritative when the environment variable is true.
+- Store consent in the installation-level `product_telemetry_consent` property as a boolean. A missing property is undecided, `false` is opted out, and `true` opts in to all current and future product-usage metrics.
+- Add an Owner-only API to read and set the boolean. The initial prompt and an Owner settings control use the same API, allowing consent to be reviewed and changed later.
+- Obot Cloud sets `OBOT_SERVER_PRODUCT_ANALYTICS_FORCE_ENABLED=true`. This supplies effective consent independently of the `product_telemetry_consent` property: collect all product-usage metrics, suppress the consent UI, and provide no opt-out. The property is neither required nor authoritative when the environment variable is true, and the API does not allow changing effective consent.
 
 ### Collection and transport
 
 - In an independent PR, move upgrade-check lifecycle and state into `pkg/upgrade.Checker`; `VersionHandler` will read its status through a small interface. This is not strictly necessary, but is an opportunity for clearer organization that was identified.
 - Put telemetry collection, transport, and scheduling in `pkg/producttelemetry`. Start its context-bound job during `pkg/services.New`; it runs immediately and then daily at a fixed time, reading consent on each run.
 - Reuse `pkg/upgrade` only for the installation ID. Define payload types in `apiclient/types`.
-- Always collect the operational installation metadata. Map each consent enum to its product-usage collector and payload fields, then send the metadata and only authorized product-usage fields in a JSON `POST` to upgrade-server.
+- Always collect the operational installation metadata. When effective consent is true, collect every product-usage metric defined by that release; otherwise send a metadata-only JSON `POST` to upgrade-server.
 
 ### Relocating upgrade-check metadata
 
@@ -132,7 +132,7 @@ Reports are identified by installation ID and the UTC date of `reportedAt`. A ne
 
 ### Failure behavior
 
-- On self-hosted installations, undecided, opted-out, or wholly unrecognized consent produces a metadata-only request with no product-usage metrics.
+- On self-hosted installations, undecided or opted-out consent produces a metadata-only request with no product-usage metrics.
 - Telemetry initialization, collection, and delivery failures are logged but never block startup or normal operation.
 - Failed delivery uses exponential backoff with the same installation ID and `reportedAt`.
 
@@ -149,11 +149,11 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 ## Trade-offs
 
 - JSON is simple and consistent with the current integration, at the cost of compile-time contract enforcement and wire efficiency.
-- Identifier-based consent is more complex than a boolean but prevents new telemetry from inheriting prior consent and leaves possibility for future fine-grained options.
+- Boolean consent keeps the UI, API, and collection path simple, but automatically authorizes product-usage metrics added after opt-in. Public documentation must remain current so Owners can make and revisit an informed choice.
 
 ## Risks and open questions
 
-- **User trust:** Mitigate discomfort with explicit opt-in, plain-language disclosure, and complete public documentation. The initial release does not provide UI or API controls to review or change consent.
+- **User trust:** Mitigate discomfort with explicit opt-in, plain-language disclosure, complete public documentation, and controls to review or change consent.
 
 ## Rollout and migration
 
@@ -164,17 +164,16 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 
 ## Testing and validation
 
-- Verify self-hosted consent states, Owner-only decisions, repeated prompting while undecided, and no UI or API for later review or changes.
+- Verify missing, `false`, and `true` consent; Owner-only API access; repeated prompting while undecided; and later UI/API changes in both directions.
 - Verify `OBOT_SERVER_PRODUCT_ANALYTICS_FORCE_ENABLED=true` sends all telemetry without a consent property or UI and overrides stored undecided or opt-out state.
 - Verify opted-out and undecided installations send only distribution, engine, and current version.
 - Verify upgrade checks continue for installations that do not send product-usage metrics, using the current version supplied directly to `/check-upgrade`.
-- Verify only collectors for recognized, consented identifiers run.
+- Verify all product-usage collectors run only when effective consent is true, including metrics added after the original opt-in.
 - Verify previous-full-day UTC boundaries, report-time totals, and existing count definitions.
 - Verify custom MCP servers and prohibited data never enter a payload.
 - Verify `null` versus measured zero serialization.
 - Verify telemetry failures do not affect startup, normal operation, or upgrade checks.
 - Verify request compatibility, retry identity, and newer-report replacement.
-- Add an end-to-end contract test with a representative authorized payload.
 
 ## References
 
