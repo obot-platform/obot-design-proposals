@@ -51,7 +51,7 @@ Every report also includes the following operational installation metadata indep
 
 ## Non-goals
 
-- Collecting user-level activity, customer content, credentials, configuration values, URLs, exact errors, or other identifying data.
+- Collecting user-level activity, customer content, credentials, configuration values, URLs, or exact errors.
 - Reporting the identity or configuration of custom MCP servers.
 - Defining an exhaustive long-term telemetry schema.
 - Providing per-metric consent choices.
@@ -98,7 +98,7 @@ Add `distribution`, `engine`, and `currentVersion` to the telemetry report so in
 
 ### Payload
 
-Reports are identified by installation ID and the UTC date of `reportedAt`. A newer `reportedAt` replaces older data for that date. Optional scalar and count fields use Go pointers: `null` means unavailable, while `0` means a measured zero. A metadata-only report omits `metrics`.
+Reports are deduplicated by installation ID and `reportedAt` truncated to its UTC date. The first accepted report for that key is retained; later reports for the same installation and date are treated as successful duplicates rather than replacing it. Optional scalar and count fields use Go pointers: `null` means unavailable, while `0` means a measured zero. A metadata-only report omits `metrics`.
 
 ```json
 {
@@ -173,7 +173,7 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 - Verify custom MCP servers and prohibited data never enter a payload.
 - Verify `null` versus measured zero serialization.
 - Verify telemetry failures do not affect startup, normal operation, or upgrade checks.
-- Verify request compatibility, retry identity, and newer-report replacement.
+- Verify request compatibility, retry identity, and first-write deduplication by installation ID and UTC report date.
 
 ## References
 
