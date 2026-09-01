@@ -36,9 +36,13 @@ The initial release defines one consent identifier per telemetry type:
 - `ActiveUsers`: users active during the previous full UTC day.
 - `DeployedMCPServers`: total deployed MCP servers.
 - `BuiltInMCPServerUsage`: stable name, ID, deployment count, and aggregate user count for each built-in catalog server.
+- `CustomMCPServerEntryCount`: total non-built-in MCP catalog entries.
 - `AuthProviderType`: configured authentication-provider type.
 - `MCPAuditLogCount`: MCP audit-log records created during the previous full UTC day.
 - `LLMAuditLogCount`: LLM audit-log records created during the previous full UTC day.
+- `SentryScanCount`: Sentry device scans received during the previous full UTC day.
+- `SentryEnforcementEventCount`: Sentry enforcement-decision records created during the previous full UTC day.
+- `ManagedSkillCount`: total skills managed from configured skill repositories at collection time.
 
 ## Non-goals
 
@@ -88,6 +92,7 @@ Reports are identified by installation ID and the UTC date of `reportedAt`. A ne
     "totalUsers": 42,
     "activeUsers": null,
     "deployedMCPServers": 0,
+    "customMCPServerEntryCount": 4,
     "builtInMCPServers": [
       {
         "id": "github",
@@ -98,7 +103,10 @@ Reports are identified by installation ID and the UTC date of `reportedAt`. A ne
     ],
     "authProviderType": "github",
     "mcpAuditLogCount": 0,
-    "llmAuditLogCount": null
+    "llmAuditLogCount": null,
+    "sentryScanCount": 14,
+    "sentryEnforcementEventCount": 3,
+    "managedSkillCount": 27
   }
 }
 ```
@@ -138,7 +146,7 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 
 - Verify consent states, Owner-only decisions, repeated prompting while undecided, and no UI or API for later review or changes.
 - Verify only collectors for recognized, consented identifiers run.
-- Verify previous-full-day UTC boundaries and existing user-count definitions.
+- Verify previous-full-day UTC boundaries, report-time totals, and existing count definitions.
 - Verify custom MCP servers and prohibited data never enter a payload.
 - Verify `null` versus measured zero serialization.
 - Verify telemetry failures do not affect startup, normal operation, or upgrade checks.
