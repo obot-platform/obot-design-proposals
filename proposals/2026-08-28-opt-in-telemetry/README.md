@@ -5,9 +5,9 @@
 
 ## Summary
 
-Add installation-level product telemetry to understand Obot adoption and use of built-in capabilities. Move distribution and engine reporting from the upgrade check into this collection while also reporting the current version in both. Every installation reports these three operational fields; self-hosted installations add product-usage metrics after an Owner opts in, while Obot Cloud always adds them.
+Add installation-level product telemetry to understand Obot adoption and use of built-in capabilities. Move distribution and engine reporting from the upgrade check into this collection while also reporting the current version in both. Every installation reports these three operational fields; self-hosted installations add product-usage metrics after an administrator opts in, while Obot Cloud always adds them.
 
-For self-hosted installations, consent is a boolean that Owners can review and change. Opt-in applies to current and future product-usage metrics.
+For self-hosted installations, consent is a boolean that any administrator can review and change. Opt-in applies to current and future product-usage metrics.
 
 ## Related issues
 
@@ -75,10 +75,10 @@ Telemetry must send only aggregate installation-level values, document every col
 
 ### Consent
 
-- Show Owners an explicit all-or-nothing choice during login until one records a decision. Dismissing the modal is not consent.
+- Show administrators an explicit all-or-nothing choice during login until one records a decision. Dismissing the modal is not consent.
 - Explain the collection and link to its complete public documentation.
 - Store consent in the installation-level `product_telemetry_consent` property as a boolean. A missing property is undecided, `false` is opted out, and `true` opts in to all current and future product-usage metrics.
-- Add an Owner-only API to read and set the boolean. The initial prompt and an Owner settings control use the same API, allowing consent to be reviewed and changed later.
+- Add an API available to Admin and Owner roles to read and set the boolean. The initial prompt and an administrator settings control use the same API, allowing any administrator to review and change consent later.
 - Obot Cloud sets `OBOT_SERVER_PRODUCT_ANALYTICS_FORCE_ENABLED=true`. This supplies effective consent independently of the `product_telemetry_consent` property: collect all product-usage metrics, suppress the consent UI, and provide no opt-out. The property is neither required nor authoritative when the environment variable is true, and the API does not allow changing effective consent.
 
 ### Collection and transport
@@ -98,7 +98,7 @@ Add `distribution`, `engine`, and `currentVersion` to the telemetry report so in
 
 ### Payload
 
-Reports are deduplicated by installation ID and `reportedAt` truncated to its UTC date. The first accepted report for that key is retained; later reports for the same installation and date are treated as successful duplicates rather than replacing it. Optional scalar and count fields use Go pointers: `null` means unavailable, while `0` means a measured zero. A metadata-only report omits `metrics`.
+Our metrics platform will deduplicated reports by installation ID and `reportedAt` truncated to its UTC date. The first accepted report for that key is retained; later reports for the same installation and date are treated as successful duplicates rather than replacing it. Optional scalar and count fields use Go pointers: `null` means unavailable, while `0` means a measured zero. A metadata-only report omits `metrics`.
 
 ```json
 {
@@ -149,7 +149,7 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 ## Trade-offs
 
 - JSON is simple and consistent with the current integration, at the cost of compile-time contract enforcement and wire efficiency.
-- Boolean consent keeps the UI, API, and collection path simple, but automatically authorizes product-usage metrics added after opt-in. Public documentation must remain current so Owners can make and revisit an informed choice.
+- Boolean consent keeps the UI, API, and collection path simple, but automatically authorizes product-usage metrics added after opt-in. Public documentation must remain current so administrators can make and revisit an informed choice.
 
 ## Risks and open questions
 
@@ -159,12 +159,12 @@ Use gRPC for a structured, evolvable contract. It adds dependencies and build co
 
 - Deploy the receiving upgrade-server capability before releasing the Obot sender.
 - Migrate distribution and engine using the compatibility sequence in **Relocating upgrade-check metadata**; add current version to telemetry without removing it from `/check-upgrade`.
-- Existing self-hosted installations begin undecided and send only operational metadata until an Owner opts in. Obot Cloud starts fully enabled without prompting.
+- Existing self-hosted installations begin undecided and send only operational metadata until an administrator opts in. Obot Cloud starts fully enabled without prompting.
 - Monitor request acceptance and delivery failures as installations upgrade.
 
 ## Testing and validation
 
-- Verify missing, `false`, and `true` consent; Owner-only API access; repeated prompting while undecided; and later UI/API changes in both directions.
+- Verify missing, `false`, and `true` consent; Admin and Owner API access; repeated prompting while undecided; and later UI/API changes in both directions by any administrator.
 - Verify `OBOT_SERVER_PRODUCT_ANALYTICS_FORCE_ENABLED=true` sends all telemetry without a consent property or UI and overrides stored undecided or opt-out state.
 - Verify opted-out and undecided installations send only distribution, engine, and current version.
 - Verify upgrade checks continue for installations that do not send product-usage metrics, using the current version supplied directly to `/check-upgrade`.
