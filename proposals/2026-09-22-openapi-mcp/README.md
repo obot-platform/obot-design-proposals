@@ -175,13 +175,10 @@ exclude:
 
 This leaves `GET /users` and POST operations on other paths available.
 
-Obot validates the combination when saving configuration: nonempty exclusions
-with search disabled are an error, not silently ignored. The container consumes
-the saved settings without repeating this policy validation. If it cannot apply
-a setting, it must not silently drop an exclusion or expose an operation that
-should be unavailable. The UI only offers exclusions in search mode. Switching
-search off requires removing the rules and reviewing the resulting direct tools
-and vMCP selections.
+Obot rejects exclusions when Tool Search is off. The container consumes saved
+settings without repeating that check, but must not ignore exclusions or expose
+blocked operations. The UI offers exclusions only in search mode; disabling
+search requires clearing the rules and reviewing direct tools.
 
 This distinction matters because vMCP sees individual operations without search,
 but sees only the search and invocation tools with search enabled. It cannot
@@ -228,17 +225,12 @@ calls by name. Verify this behavior against the pinned FastMCP release.
 ### Failures and operations
 
 Use the existing hosted-MCP lifecycle for startup, health, restart, and shutdown.
-If schema conversion or OpenAPI configuration fails, log a safe diagnostic and
-keep the container running. Continue serving unaffected operations only when
-doing so cannot widen the available tool set or bypass an exclusion. Otherwise,
-keep the HTTP server available in an error state. Return a non-successful
-readiness response with a safe error for Obot, and return MCP errors to requests
-that reach the container.
-Keep liveness separate from readiness so the error state does not cause a
-container restart loop. Obot should show the reason in component status. Keep
-secrets and specification contents out of diagnostics. Bound parsing, HTTP
-requests, concurrency, and response sizes; return useful tool errors for
-upstream failures.
+On schema or configuration errors, keep the container running and log a safe
+reason. Serve unaffected operations only if access cannot widen. Otherwise,
+fail readiness and MCP requests with safe errors, keep liveness healthy, and
+show the reason in vMCP status. Keep secrets and specification contents out of
+diagnostics. Bound parsing, HTTP requests, concurrency, and response sizes;
+return useful tool errors for upstream failures.
 Apply network policy to specification/reference loading and API requests,
 including redirects. Containerization does not remove these requirements.
 
@@ -288,10 +280,8 @@ never fall back to an unfiltered server after a configuration error.
 - Without search, verify vMCP enforces direct tool restrictions and FastMCP
   exclusions are rejected. With search, verify excluded operations cannot be
   found or called through either invocation path.
-- Inject schema conversion and OpenAPI configuration errors. Verify the process
-  stays running, liveness succeeds, readiness and MCP requests report safe
-  errors, and Obot shows the cause. Verify unaffected operations continue only
-  when doing so cannot widen access.
+- Inject conversion and configuration errors; verify the process stays up, Obot
+  sees safe errors, and no blocked operation becomes available.
 - Test concurrent users with different user-allowed keys through one shared
   container in both modes. Verify each API request uses the correct credential
   and missing keys cannot reuse another user's key. Also verify fixed keys reach
