@@ -28,6 +28,8 @@ Search, tool selection belongs to vMCP.
 - [Virtual MCPs](../2026-09-01-virtual-mcps/README.md) — extends the available
   catalog component types and follows its connection, configuration, and
   snapshot/upgrade model.
+- [Move OpenAPI search and execute to vMCPs](../2026-09-28-openapi-search-execute-scope/README.md)
+  — changes the planned scope of FastMCP Tool Search and its invocation tools.
 
 ## Problem and motivation
 
