@@ -454,13 +454,6 @@ There will be documentation guiding admins on how to enable SCIM:
 - [Okta: SCIM provisioning integration overview](https://developer.okta.com/docs/guides/scim-provisioning-integration-overview/main/)
 - [Okta: SCIM 2.0 protocol reference](https://developer.okta.com/docs/api/openapi/okta-scim/guides/scim-20/)
 
-## Addendum: migrating away from SCIM
+## Amendment A: Deconfiguring a provider with SCIM enabled
 
-In this implementation, turning SCIM off will not be supported. However, it is theoretically possible to add this in the future. It would be a two-stage migration process that looks like this:
-
-1. The admin provides Okta Management API credentials to initiate the migration.
-2. Obot queries Okta to get the Group ID for every group in the system that was provisioned by SCIM (based on display name)
-3. Any conflicts (multiple groups with the same display name) must be manually resolved by an admin in the UI
-4. A "commit" button that the admin clicks officially disables SCIM. Obot will no longer respond to the SCIM endpoints. User group memberships will be synced on authenticated requests every 10 minutes again.
-
-This is documented here in case we want to implement it in the future.
+During development, I figured out that it would be better to, rather than retain SCIM data after deconfiguring the provider, delete it, and all pushed groups and group assignments. This is simpler and behaves much more like existing auth providers (which wipe groups and group memberships when deconfigured), and provides an escape hatch for people who want to discontinue using SCIM (deconfigure, then reconfigure with the credentials needed to query for groups). 
