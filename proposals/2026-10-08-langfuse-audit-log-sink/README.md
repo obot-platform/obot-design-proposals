@@ -43,8 +43,9 @@ Obot's OpenTelemetry export (`pkg/otel/otel.go`) does not fill the gap: the only
   without any external job.
 - Records are attributed to the user by email and grouped into Langfuse sessions.
 - A Langfuse outage or misconfiguration never affects MCP traffic.
-- No record is skipped silently: delivery is at-least-once within the retention window, and
-  any gap is reported on the sink's status.
+- Each record is sent once: no record is skipped silently and none is re-sent in normal
+  operation, because Langfuse v4 does not deduplicate repeated span IDs. Any gap is reported
+  on the sink's status.
 - Shipping request/response bodies requires the same privilege as exporting them today.
 
 ## Non-goals
@@ -79,8 +80,16 @@ Obot's OpenTelemetry export (`pkg/otel/otel.go`) does not fill the gap: the only
   users still resolve).
 - **Langfuse ingestion.** The legacy `POST /api/public/ingestion` API is deprecated and stops
   accepting trace and observation events on Langfuse Cloud on 2026-11-16; the replacement is
-  `POST /api/public/otel/v1/traces` (OTLP over HTTP, JSON or protobuf, no gRPC). Langfuse
-  stores traces only.
+  `POST /api/public/otel/v1/traces` (OTLP over HTTP, JSON or protobuf, gzip supported, no
+  gRPC). Langfuse stores traces only. Self-hosted deployments need Langfuse v3.22.0 or later
+  for the OTLP endpoint.
+- **Langfuse v4 span rules** ([custom ingestion migration
+  guide](https://langfuse.com/integrations/native/opentelemetry/migration-to-v4)): send the
+  `x-langfuse-ingestion-version: 4` header; export each operation as one complete span; do not
+  re-export a span ID that Langfuse already accepted ("Langfuse v4 does not reliably
+  deduplicate repeated records ... Re-ingesting the same ID can create duplicate
+  observations"); put input and output on the root observation; copy user, session and
+  filterable metadata to every span.
 
 ## Proposed design
 
@@ -106,7 +115,7 @@ flowchart LR
      withRequestAndResponse: false   # Auditor-only to set true
      maxBodyBytes: 262144            # truncate larger bodies, mark as truncated
    status:
-     cursor: {createdAt: ..., id: 12345}
+     cursor: {id: 12345}             # last delivered audit log row ID
      lastSentAt: ...
      lastError: ""
      gaps: []                        # windows lost to retention while the sink was failing
@@ -121,18 +130,25 @@ flowchart LR
    Write-only through the API, with a `Test` endpoint that sends one empty OTLP request.
 
 3. **Controller** on the leader. Every poll interval (default 15s):
-   - Select rows with `(created_at, id) > cursor` and `created_at < now() - settle`, ordered by
-     `(created_at, id)`, up to a batch size.
-   - `settle` (default 60s, must exceed the persist interval) gives response entries time to
-     merge into their request rows. A row still without a response after `settle` is sent as
-     incomplete.
+   - Select rows with `id > cursor`, ordered by `id`, up to a batch size. The cursor is the
+     auto-increment row ID rather than `created_at`, because a persistence batch that is
+     retried can commit rows whose `created_at` is older than rows already delivered; their
+     IDs are still higher than the cursor.
+   - Stop at the first row that is not settled: younger than `settle` (default 60s, must
+     exceed the persist interval) and still without its response. This gives response entries
+     time to merge into their request rows. A row still without a response after `settle` is
+     sent as incomplete.
+   - Read only up to the visibility horizon, so that a row whose inserting transaction is
+     still open, and which will appear with a lower ID than rows already visible, is not
+     skipped (see open question 1).
    - Resolve user emails for the batch (cached), decrypt bodies only when
      `withRequestAndResponse` is true, map to spans, send, and on a 2xx write the new cursor to
      status. On failure, keep the cursor and back off (retry client modelled on
      `pkg/producttelemetry/client.go`).
-   - Each poll re-reads a short overlap behind the cursor to catch rows whose persistence was
-     retried after later rows had committed. Span IDs are deterministic, so a re-sent row maps
-     to the same span (see open question 1).
+   - Never re-read behind the cursor. Langfuse v4 does not deduplicate repeated span IDs, so
+     each row is sent once. The one exception is an ambiguous failure (a timeout after
+     Langfuse may have accepted the batch): the batch is retried, which can duplicate those
+     spans. Batches are kept small to bound this, and it is documented as a known limitation.
    - If the oldest unsent row has passed retention, record the lost window in `status.gaps`
      and continue from the oldest remaining row.
 
@@ -150,22 +166,29 @@ flowchart LR
 All spans carry the resource attribute `service.name=obot` and the header
 `x-langfuse-ingestion-version: 4`.
 
-| Langfuse field | From the MCP audit row |
-|---|---|
-| Trace ID (16 bytes) | `sha256("mcp" + mcpID + userID + sessionID)[:16]` |
-| Span ID (8 bytes) | `sha256("mcp" + id)[:8]` |
-| Name | `callIdentifier` (tool name) |
-| `langfuse.observation.type` | `tool` |
-| `session.id` | `sessionID` |
-| `user.id` | user's newest email, resolved at send time; Obot user ID if the user has no email |
-| Input / output | `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result`, only with `withRequestAndResponse` |
-| Status | `error`, `responseStatus` |
-| Metadata | Obot user ID, server display name, catalog entry, client name and version, API key name, processing time |
-| Timing | `createdAt` to `createdAt + processingTimeMs` |
+Each tool call is its own trace with one root span. Calls are grouped through the Langfuse
+session (the MCP session), following Langfuse's guidance to group related traces with session
+IDs. A single-span trace also satisfies the v4 rules that the root observation carries the
+input and output, and that user, session and metadata are on every span.
 
-Hashing keeps IDs stable across re-sends and fixed-width as OTLP requires. Spans are built as
-read-only span snapshots with these IDs and passed to the `otlptracehttp` exporter directly;
-the tracer's random ID generator and batch processor are not used.
+| Langfuse field | OTel attribute | From the MCP audit row |
+|---|---|---|
+| Trace ID (16 bytes) | span context | `sha256("obot-mcp" + id)[:16]` |
+| Span ID (8 bytes) | span context, no parent | `sha256("obot-mcp-span" + id)[:8]` |
+| Trace and observation name | `langfuse.trace.name`, span name | `callIdentifier` (tool name) |
+| Type | `langfuse.observation.type` | `tool` |
+| Session | `langfuse.session.id` | `sessionID` |
+| User | `langfuse.user.id` | user's newest email, resolved at send time; Obot user ID if the user has no email |
+| Input / output | `langfuse.observation.input` / `langfuse.observation.output` (JSON strings) | tool arguments / tool result, only with `withRequestAndResponse` |
+| Level / status message | span status, `langfuse.observation.level` | `ERROR` with `error` when the call failed |
+| Filterable metadata | `langfuse.observation.metadata.<key>` | `obot_user_id`, `mcp_server`, `catalog_entry`, `client_name`, `client_version`, `api_key_name`, `response_status` |
+| Timing | `startTimeUnixNano` / `endTimeUnixNano` (both always set) | `createdAt` to `createdAt + processingTimeMs` |
+
+Deriving IDs from the row ID makes them fixed-width as OTLP requires and traceable back to
+the audit log. Spans are built as read-only span snapshots with these IDs and passed to the
+`otlptracehttp` exporter directly; the tracer's random ID generator and batch processor are
+not used. Metadata uses the `langfuse.observation.metadata.` prefix because unprefixed
+attributes land under `metadata.attributes` and are not filterable in Langfuse.
 
 ### Security and privacy
 
@@ -232,14 +255,18 @@ because its attribute mapping (observation types, sessions, users) is well defin
 
 ## Risks and open questions
 
-1. **Idempotency in Langfuse.** The overlap re-read relies on Langfuse treating a re-sent span
-   with the same trace and span ID as an update, not a duplicate. Not yet verified against
-   Langfuse v4 OTLP ingestion. Owner: author, before implementation; fallback is no overlap and
-   a strictly monotonic cursor.
-2. **Late commits.** A persistence batch that is retried can commit rows older than the cursor.
-   The overlap covers short delays; the right overlap length depends on (1).
-3. **Payload size.** Langfuse's maximum OTLP request and attribute size needs confirming;
-   `maxBodyBytes` truncation is the proposed guard.
+1. **Visibility horizon.** Concurrent inserts from several replicas can make a lower row ID
+   visible after a higher one. Because the cursor never moves backwards, the controller must
+   only read IDs below a horizon that no open transaction can still fill (for example from
+   Postgres snapshot visibility, or by holding back IDs newer than a short delay). The exact
+   mechanism is to be settled with maintainers during implementation.
+2. **Duplicates on ambiguous failures.** Langfuse v4 does not deduplicate a re-sent span ID,
+   so retrying a batch after a timeout can duplicate spans. Proposed: small batches and a
+   documented limitation. An alternative is not retrying ambiguous failures and recording them
+   as gaps instead; reviewers' preference wanted.
+3. **Payload size.** Langfuse's API reference documents no maximum OTLP request or attribute
+   size. `maxBodyBytes` truncation plus gzip are the proposed guards; limits to be measured
+   against a test deployment.
 4. **Email changes.** Decided: spans always carry the user's newest email, looked up at send
    time, never the email recorded when the call was made. The email cache has a short TTL
    (default 5 minutes) so a change takes effect quickly. Spans already sent are not rewritten,
@@ -258,15 +285,20 @@ because its attribute mapping (observation types, sessions, users) is well defin
 - Unit tests for row-to-span mapping, deterministic IDs, email resolution and fallback, body
   gating and truncation.
 - Controller tests with a fake OTLP receiver: cursor advance on 2xx, no advance on failure,
-  backoff, overlap re-read, gap recording when rows age out.
-- Integration test against Langfuse in Docker: tool observations appear with the expected
-  session, user and (when enabled) input/output, and re-sends do not duplicate.
+  backoff, rows held back at the visibility horizon and unsettled rows, gap recording when
+  rows age out.
+- Integration test against Langfuse in Docker, following Langfuse's canary checklist: tool
+  observations appear without ingestion delay, with the expected name, timing, session, user,
+  filterable metadata and (when enabled) input/output, and a controller restart neither skips
+  nor re-sends rows.
 - Authorization tests: an Admin without Auditor cannot enable bodies.
 
 ## References
 
 - [Audit log export](https://docs.obot.ai/configuration/audit-log-export/)
 - [Langfuse OpenTelemetry integration](https://langfuse.com/integrations/native/opentelemetry)
+- [Migrate custom ingestion to Langfuse v4](https://langfuse.com/integrations/native/opentelemetry/migration-to-v4)
+- [Langfuse tracing best practices](https://langfuse.com/docs/observability/best-practices)
 - `adr/2026-09-02-sql-leader-lock.md`
 - `pkg/gateway/client/auditlogpersister.go`, `pkg/gateway/client/mcpauditlog.go`,
   `pkg/gateway/client/user.go`, `pkg/controller/handlers/auditlogexport/`
