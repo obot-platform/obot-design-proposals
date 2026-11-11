@@ -283,9 +283,6 @@ come from different versions.
 
 ## Trade-offs
 
-- **Stored bodies are not bound to a server and user in the encryption
-  context**, unlike inline bodies. They are bound to their content hash
-  instead, and the row holding the reference keeps today's binding.
 - **Reads of deduplicated rows need a second query.** Batched per page, and
   only when payloads are requested.
 - **Compress-then-encrypt makes ciphertext length depend on content.** This
@@ -327,8 +324,6 @@ Unit tests:
 - Write and read round trip for every body field, encrypted and unencrypted.
 - Two identical `tools/list` results with different JSON-RPC ids are stored
   once and each row reads back byte-identical to its original body.
-- The same result for two users, or two servers, is stored once, and
-  different results are stored separately.
 - Reading rows in the old format, and rows mixing old and new fields (old
   request, new response).
 - Non-list methods, error responses, unparseable bodies, and responses
