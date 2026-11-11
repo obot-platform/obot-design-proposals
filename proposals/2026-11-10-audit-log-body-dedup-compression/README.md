@@ -13,8 +13,8 @@ This proposal makes two changes to how MCP audit bodies are stored:
 1. **Compression**: prior to encryption, every body field is zstd-compressed. A per-
    field header is included with the new format so existing rows continue to read correctly.
 2. **Deduplicate list responses**: the result of a `tools/list`, `prompts/list`, `resources/list`,
-   or `resources/templates/list` response is stored once per MCP server + user pair in a new table,
-   keyed by a hash. The audit row keeps the JSON-RPC envelope and a reference. Readers rebuild the
+   or `resources/templates/list` response is stored once in a new table, keyed by a hash of its
+   contents, and shared by every audit row with the same result. The audit row keeps the JSON-RPC envelope and a reference. Readers rebuild the
    original bytes. List responses rarely change, so this should cut down on a lot of duplicate logs.
 
 No modifications will be made to existing audit logs. Compression and deduplication will
@@ -50,8 +50,7 @@ and these are the obvious best first steps to mitigate that problem.
 - Backfilling or rewriting existing rows
 - Implementing this for LLM audit logs or egress audit logs (though this could be
   done as a follow-up)
-- Deduplicating anything other than `/list` responses, or sharing stored bodies across
-  users or across MCP servers
+- Deduplicating anything other than `/list` responses
 - Reclaiming disk space already allocated to the `mcp_audit_logs` table
 - Changing the information captured in audit logs, the retention period, or moving
   audit log bodies out of Postgres
@@ -127,24 +126,30 @@ are the design.
 
 ### Stored list bodies
 
-A new table holds each distinct list `result` once per MCP server and user:
+A new table holds each distinct list `result` once for the whole install:
 
 ```text
 mcp_audit_log_bodies
-  id                  primary key
-  mcp_id              text
-  user_id             text
-  hash                bytea     HMAC-SHA256 of the plaintext result bytes
+  hash                bytea     primary key; HMAC-SHA256 of the plaintext result bytes
   body                bytea     field format above (compressed, then encrypted)
   created_at          timestamp
   last_referenced_at  timestamp, indexed
-  unique (mcp_id, user_id, hash)
 ```
 
-- **Scope is per MCP server and user.** The stored body is encrypted with the
-  same `mcpauditlogs/<mcpID>/<userID>` context as the rows that reference it,
-  so the encryption binding is exactly today's and nothing is shared or
-  revealed across users.
+- **Bodies are shared across users and MCP servers.** The hash is of the
+  content, so two rows share a stored body only when their results are
+  byte-identical. A server that returns different lists to different users
+  simply produces different hashes.
+- **No user or server is recorded on a stored body.** The table does not show
+  who received a body or which rows reference it. The reference lives inside
+  the audit row's encrypted field, under that row's existing
+  `mcpauditlogs/<mcpID>/<userID>` context.
+- **Stored bodies are encrypted under a context that includes their hash**,
+  `mcpauditlogs/bodies/<hash>`, since they can no longer be bound to one
+  server and user. This ties each ciphertext to the hash that rows reference.
+- **Access is unchanged.** A stored body is only ever read through an audit
+  row the caller is allowed to see, and that row's original body contained
+  the same bytes.
 - **Eligible bodies.** `ResponseBody` and `OriginalResponseBody` of the four
   list methods, when the body parses as a JSON-RPC success response with a
   `result` of at least 2 KiB. Postgres keeps values below about 2 KB in the
@@ -191,14 +196,14 @@ sequenceDiagram
     C->>C: compress + encrypt fields<br/>(result separately if eligible)
     C->>C: buffer
     Note over C,DB: flush transaction
-    C->>DB: upsert body (mcp_id, user_id, hash),<br/>bump last_referenced_at if stale
+    C->>DB: upsert body (hash),<br/>bump last_referenced_at if stale
     C->>DB: insert row / update response_body with reference
 ```
 
 - The stored-body upsert and the audit row write happen in the same
   transaction, so a committed row never references a body that was not
   written.
-- The upsert is `INSERT … ON CONFLICT (mcp_id, user_id, hash) DO UPDATE SET
+- The upsert is `INSERT … ON CONFLICT (hash) DO UPDATE SET
   last_referenced_at = …`, applied only when the body is absent or its
   `last_referenced_at` is more than a day old. A fresh existing body costs one
   indexed lookup and no write.
@@ -210,9 +215,8 @@ sequenceDiagram
 
 - Fields are decoded by marker: old-format fields as today; new-format fields
   are decrypted (if flagged), then decompressed (if flagged).
-- For reference fields, the reader collects the distinct `(mcp_id, user_id,
-  hash)` keys in the page, fetches them in one query, and splices each result
-  into its envelope. A page of identical `tools/list` rows fetches one body.
+- For reference fields, the reader collects the distinct hashes in the page,
+  fetches them in one query, and splices each result into its envelope. A page of identical `tools/list` rows fetches one body.
 - Queries that omit body columns (list views without payloads) never touch
   the new table.
 - **Failures.** If a field or its stored body is missing, or fails to decrypt
@@ -265,10 +269,12 @@ Encrypting identical plaintext to identical ciphertext would let equal bodies
 be detected, but Postgres still would not share TOAST values between rows, and
 the KMS-backed transformers do not offer it.
 
-### Share stored bodies per MCP server (and not per user)
+### Store bodies separately per MCP server and user
 
-MCP servers might return different tool, resource, etc. lists based on the
-user using the MCP server, so this is not an option.
+Keeps each stored body encrypted under the same server and user context as
+its rows. It is not needed for correctness, because bodies are matched by
+content, and it stores one copy per user for results that are identical
+across users.
 
 ### Row-level format column
 
@@ -277,6 +283,9 @@ come from different versions.
 
 ## Trade-offs
 
+- **Stored bodies are not bound to a server and user in the encryption
+  context**, unlike inline bodies. They are bound to their content hash
+  instead, and the row holding the reference keeps today's binding.
 - **Reads of deduplicated rows need a second query.** Batched per page, and
   only when payloads are requested.
 - **Compress-then-encrypt makes ciphertext length depend on content.** This
@@ -318,7 +327,8 @@ Unit tests:
 - Write and read round trip for every body field, encrypted and unencrypted.
 - Two identical `tools/list` results with different JSON-RPC ids are stored
   once and each row reads back byte-identical to its original body.
-- The same result for two users, or two servers, is stored separately.
+- The same result for two users, or two servers, is stored once, and
+  different results are stored separately.
 - Reading rows in the old format, and rows mixing old and new fields (old
   request, new response).
 - Non-list methods, error responses, unparseable bodies, and responses
