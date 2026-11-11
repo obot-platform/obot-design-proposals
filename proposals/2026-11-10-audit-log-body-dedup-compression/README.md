@@ -1,28 +1,24 @@
 # 2026-11-10: Deduplicate and compress MCP audit log bodies
 
-- **Authors:** @g-linville
-- **Created:** 2026-11-10
+- **Author**: @g-linville
+- **Created**: 2026-11-10
 
 ## Summary
 
-`mcp_audit_logs` is 95–99% of the database in active hosted environments, and
-almost all of it is encrypted request and response bodies. Because each body is
-encrypted before insert, Postgres can neither compress it nor share identical
-copies.
+`mcp_audit_logs` comprises over 95% of the database in hosted environments, and most
+of it is encrypted request and response bodies.
 
 This proposal makes two changes to how MCP audit bodies are stored:
 
-1. **Compress before encrypting.** Every body field, including local-agent
-   bodies and raw events, is zstd-compressed and then encrypted. A per-field
-   header marks the new format so existing rows keep reading correctly.
-2. **Store list responses once.** The `result` of a `tools/list`,
-   `prompts/list`, `resources/list`, or `resources/templates/list` response is
-   stored once per MCP server and user in a new table, keyed by a keyed hash.
-   The audit row keeps the JSON-RPC envelope and a reference. Readers rebuild
-   the original bytes.
+1. **Compression**: prior to encryption, every body field is zstd-compressed. A per-
+   field header is included with the new format so existing rows continue to read correctly.
+2. **Deduplicate list responses**: the result of a `tools/list`, `prompts/list`, `resources/list`,
+   or `resources/templates/list` response is stored once per MCP server + user pair in a new table,
+   keyed by a hash. The audit row keeps the JSON-RPC envelope and a reference. Readers rebuild the
+   original bytes. List responses rarely change, so this should cut down on a lot of duplicate logs.
 
-The API, UI, export, and webhook payloads are unchanged. No backfill is
-performed; old rows age out through retention.
+No modifications will be made to existing audit logs. Compression and deduplication will
+apply only to new audit logs.
 
 ## Related issues
 
@@ -38,49 +34,27 @@ None.
 
 ## Problem and motivation
 
-Measurements from three production environments in November 2026 (from
-[#8418](https://github.com/obot-platform/obot/issues/8418)):
-
-| Env | `mcp_audit_logs` size | Rows | Source of bytes (last 30 days) |
-|---|---|---|---|
-| A | 9.1 GB | 115k | `tools/list`: 4,736 calls, 2.75 GB of 3.4 GB written (~580 KB each) |
-| B | 32 GB | 1.7M | `tools/list`: 31k calls, 2.76 GB of ~3.3 GB (~88 KB each) |
-| C | 5.3 GB | 8k | local-agent tool-call events: ~2.4 GB a month from one user (~830 KB each) |
-
-Retention defaults to 90 days, so a table settles at roughly three months of
-writes. For hosted per-seat pricing, heavy users cost about $3–4 per user per
-month in database storage alone.
-
-Postgres cannot reduce this today. `encryptMCPAuditLog` encrypts each body
-before insert, so TOAST compression saves nothing, and identical plaintext
-produces different ciphertext, so nothing can be shared.
+Audit logs are simply taking up way too much space in production environments,
+and these are the obvious best first steps to mitigate that problem.
 
 ## Goals
 
-- Cut stored bytes for MCP gateway audit workloads substantially. The issue
-  estimates about 80%; see [Risks](#risks-and-open-questions) for what that
-  depends on.
-- The API, UI, audit log export, and webhooks return the same full bodies as
-  today, byte for byte.
-- Existing rows keep working with no backfill.
-- Encryption at rest is no weaker than today. Installs without encryption
-  configured still work.
-- Retention removes stored bodies that no audit row references, safely with
-  several replicas writing and cleaning up at once.
+- Substantially reduce stored bytes for MCP audit logs
+- Keep existing API, UI, audit log export, and webhook behavior
+- No effect on existing audit logs
+- Retention removes stored `/list` bodies that are no longer referenced by any
+  remaining audit logs
 
 ## Non-goals
 
-- Backfilling or rewriting existing rows.
-- LLM audit logs and egress audit logs. They store bodies the same way and
-  could adopt the same field codec later.
-- Removing the duplicated local-agent response
-  ([#8420](https://github.com/obot-platform/obot/issues/8420)).
-- Deduplicating anything other than list-method responses, or sharing stored
-  bodies across users or across MCP servers.
-- Reclaiming disk space already allocated to the table (see
-  [Rollout](#rollout-and-migration)).
-- Changing what is captured, the retention period, or moving bodies out of
-  Postgres.
+- Backfilling or rewriting existing rows
+- Implementing this for LLM audit logs or egress audit logs (though this could be
+  done as a follow-up)
+- Deduplicating anything other than `/list` responses, or sharing stored bodies across
+  users or across MCP servers
+- Reclaiming disk space already allocated to the `mcp_audit_logs` table
+- Changing the information captured in audit logs, the retention period, or moving
+  audit log bodies out of Postgres
 
 ## Context and constraints
 
@@ -91,13 +65,6 @@ Facts about the current implementation that shape the design:
   `LocalAgentToolCallAuditLogFields` has `RequestBody`, `ResponseBody`, and
   `RawEvent`. All are `json.RawMessage`, stored as `bytea` on Postgres. SQLite
   is also supported.
-- **Encryption.** `encryptMCPAuditLog` runs each field through the
-  `mcpauditlogs` transformer and base64-encodes the result. The transformer is
-  an opaque `value.Transformer` (AWS, GCP, Azure KMS, or a custom config), so
-  no raw key is available to application code. The authenticated context is
-  `mcpauditlogs/<mcpID>/<userID>` for MCP rows. A row-level `encrypted` flag
-  says whether fields are ciphertext. With no provider configured, fields hold
-  raw JSON.
 - **The JSON-RPC envelope differs per call.** A stored response is the whole
   message, `{"jsonrpc":"2.0","id":7,"result":{…}}`. The `id` varies, so whole
   bodies are rarely identical even when the `result` is.
@@ -118,18 +85,14 @@ Facts about the current implementation that shape the design:
 - **Properties.** The gateway has a key/value `properties` table.
   `GetOrCreateProperty` encrypts the value with the configured transformer
   and stores plaintext when none is configured.
-- **Retention.** Every replica runs `deleteOldMCPAuditLogs` on a timer,
-  deleting rows with `created_at` before the cutoff in batches. This is the
-  only code that deletes audit rows. `MCPAuditLogRetentionDays = 0` disables
-  cleanup.
 
 ## Proposed design
 
 ### Field format
 
 Each body field carries its own format marker. A row-level marker would not
-work: the response `UPDATE` can be written by a different version than the
-request `INSERT`.
+work because the response `UPDATE` can be written by a different version than
+the request `INSERT`.
 
 A new-format field starts with a zero byte, which can never begin valid JSON
 or base64, followed by a version and flags:
@@ -211,11 +174,6 @@ transformer is configured and stores plaintext otherwise, so encrypted and
 unencrypted installs share one code path. Each replica caches the key in
 memory.
 
-Two replicas can race on first use: both find no key and both insert, and the
-loser fails on the primary key. The caller must retry, and the retry reads the
-winner's key. If the key still cannot be loaded, the body is stored inline
-rather than dropped.
-
 A keyed hash prevents someone with database access from confirming a guessed
 list body. The key is needed only to find an existing copy at write time. If
 it is lost or replaced, new writes miss the old copies and store new ones;
@@ -267,8 +225,7 @@ sequenceDiagram
   on `AuditLogDetails` rather than `AuditLogPayloadDetails` so one list also
   covers `rawEvent`. The same type backs the JSONL export. The UI shows a
   notice in the detail view when the list is non-empty.
-- Old-format decrypt errors keep today's behavior unless reviewers prefer to
-  align them.
+- Old-format decrypt errors keep today's behavior.
 
 ### Retention cleanup
 
@@ -292,15 +249,9 @@ the writer's upsert re-inserts the body, or the writer's update holds the row
 lock, and the delete re-checks its condition after the lock is released and
 skips the row (Postgres `READ COMMITTED`). SQLite has a single writer.
 
-If retention is disabled, stored bodies are never deleted, matching audit
-rows.
+If retention is disabled, stored bodies are never deleted.
 
 ## Alternatives considered
-
-### Status quo, or shorter retention
-
-Costs keep scaling with `tools/list` traffic. Shortening retention reduces
-audit value and only scales the problem down.
 
 ### Rely on Postgres compression
 
@@ -314,87 +265,29 @@ Encrypting identical plaintext to identical ciphertext would let equal bodies
 be detected, but Postgres still would not share TOAST values between rows, and
 the KMS-backed transformers do not offer it.
 
-### Share stored bodies per MCP server, or globally
+### Share stored bodies per MCP server (and not per user)
 
-One copy per server (or per install) regardless of user saves more when many
-users call the same server. Rejected: the stored body could no longer be bound
-to the user in the encryption context, and equality of list results across
-users would become visible in the database. Per server and user keeps today's
-binding exactly.
-
-### Deduplicate any large response
-
-Hashing every response over a size threshold would catch repeats that have not
-been measured, at the cost of hashing and looking up many unique tool-call
-bodies and placing their content in the shared table. The measured bytes are
-in list responses.
-
-### Reference counts, or sweeping for orphans
-
-Reference counts are exact but every batched retention delete must group and
-decrement, and a missed decrement leaks a body permanently. A periodic
-`NOT EXISTS` sweep needs an index on the reference and scans a very large
-table. The last-referenced timestamp needs neither.
+MCP servers might return different tool, resource, etc. lists based on the
+user using the MCP server, so this is not an option.
 
 ### Row-level format column
 
 Simpler to inspect, but wrong when the request insert and the response update
 come from different versions.
 
-### Staged rollout (read support one release before writes) or a write flag
-
-Either would avoid the upgrade window described under
-[Rollout](#rollout-and-migration). Not selected: the proposal ships reading
-and writing together, on by default, with no setting, and accepts that window.
-
 ## Trade-offs
 
-- **Simpler rows, more moving parts.** A second table, a stored secret, a
-  field codec, and a cleanup invariant replace "one row holds everything".
 - **Reads of deduplicated rows need a second query.** Batched per page, and
   only when payloads are requested.
-- **Per-user scope trades savings for isolation.** A server with many users
-  who each list tools rarely stores one copy per user per distinct result.
-- **Bodies are no longer inspectable with plain SQL** on unencrypted installs;
-  compressed fields need the application (or a small tool) to read.
 - **Compress-then-encrypt makes ciphertext length depend on content.** This
   is data at rest with no attacker-chosen plaintext alongside secrets, so the
   practical exposure is that sizes hint at compressibility.
-- **A reference reveals equality within one server and user**: someone with
-  database access can see that a user's tool list did not change between
-  calls, but not what it was.
 - **CPU.** Compression and HMAC are added to the capture path. Expected to be
-  small relative to encryption and the proxy round trip; the benchmark
-  reports it.
+  small relative to encryption and the proxy round trip.
 
 ## Risks and open questions
 
-- **Savings depend on calls per server and user.** The 80% estimate in the
-  issue was not tied to a dedup scope. Before implementation, measure in the
-  three environments how many `tools/list` calls there are per distinct
-  `(mcp_id, user_id)`. Compression alone still applies to every stored copy.
-  Owner: @g-linville.
-- **Results that differ on every call** (timestamps, ordering, pagination
-  cursors in `result`) defeat dedup for that server. Compression still
-  applies. Worth sampling real responses.
-- **Local-agent compression ratio is unmeasured** (environment C). To be
-  measured with the benchmark and real samples.
-- **Upgrade window.** See [Rollout](#rollout-and-migration). Accepted, but
-  should be called out in release notes.
-- **Cleanup invariant depends on retention being the only deleter** of audit
-  rows and on `created_at` not being later than the write. Any future delete
-  path or backdated import must preserve it, or bodies may outlive their rows
-  (a leak, not data loss). The reverse failure, a row outliving its body,
-  requires clock skew beyond the margin.
-- **Thresholds are starting values.** The 256-byte compression floor, the
-  2 KiB dedup floor, and the default zstd level are fixed constants, not
-  settings. A quick check on a small JSON sample put zstd's break-even between
-  64 and 128 bytes, with about 40% saved at 256 bytes. The benchmark on
-  realistic bodies confirms or adjusts them before merge of the
-  implementation.
-- **Response capture is unbounded today** (see
-  [Context](#context-and-constraints)). This proposal does not change that. A
-  response over 64 MiB is stored uncompressed, as it is now.
+None.
 
 ## Rollout and migration
 
@@ -415,11 +308,8 @@ and writing together, on by default, with no setting, and accepts that window.
 - **Disk space.** Postgres reuses space freed by retention but does not
   return it to the operating system. Existing tables stop growing and then
   hold steady at their current allocation unless an operator runs
-  `VACUUM FULL` or `pg_repack`. Whether hosted does this is an operations
-  decision outside this proposal.
-- **Observability.** Log errors for unavailable bodies. Validate impact with
-  table and TOAST sizes for `mcp_audit_logs` and `mcp_audit_log_bodies` before
-  and after, in the three measured environments.
+  `VACUUM FULL` or `pg_repack`. Whether we do this for hosted environments is
+  an operations decision outside this proposal.
 
 ## Testing and validation
 
